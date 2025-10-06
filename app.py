@@ -340,6 +340,105 @@ else:
         file_name="cs_zones.csv",
         mime="text/csv"
     )
+# =========================
+# ПРОГНОЗА: по ДИСТАНЦИЯ или по ВРЕМЕ (реални конкретни стойности)
+# =========================
+st.header("Прогноза (въведи дистанции ИЛИ времена)")
+
+mode = st.radio(
+    "Режим на прогноза",
+    ["По дистанция (въвеждам km)", "По време (въвеждам h:mm:ss или m:ss)"],
+    horizontal=True,
+)
+
+# --- функции от моделите (вече налични) ---
+v_id_f = ideal.v_of_s();  t_id_f = ideal.t_of_s();  s_id_f = ideal.s_of_t()
+v_p_f  = personal.v_of_s(); t_p_f = personal.t_of_s(); s_p_f  = personal.s_of_t()
+v_pm_f = personal_mod.v_of_s(); t_pm_f = personal_mod.t_of_s(); s_pm_f = personal_mod.s_of_t()
+
+if mode.startswith("По дистанция"):
+    d_str = st.text_input(
+        "Дистанции (km), разделени със запетая",
+        value="1, 3, 5, 10, 21.097, 42.195"
+    )
+    try:
+        d_list = [float(x.strip()) for x in d_str.split(",") if x.strip()]
+    except:
+        d_list = []
+
+    if d_list:
+        rows = []
+        for s in d_list:
+            # идеал
+            ti = float(t_id_f(s)); vi = float(v_id_f(s))
+            # личен (без мод.)
+            tp = float(t_p_f(s));  vp = float(v_p_f(s))
+            # личен (модулиран)
+            tpm = float(t_pm_f(s)); vpm = float(v_pm_f(s))
+
+            rows.append({
+                "distance_km": s,
+                "ideal (time + pace)":    pretty_time_with_pace(ti, vi),
+                "personal (time + pace)": pretty_time_with_pace(tp, vp),
+                "modulated (time + pace)": pretty_time_with_pace(tpm, vpm) if use_mod else "",
+                "ideal_speed_kmh": round(vi, 2),
+                "personal_speed_kmh": round(vp, 2),
+                "mod_speed_kmh": round(vpm, 2) if use_mod else np.nan
+            })
+
+        pred_df = pd.DataFrame(rows).sort_values("distance_km")
+        st.dataframe(pred_df, use_container_width=True)
+        st.download_button(
+            "Свали прогноза (по дистанция) CSV",
+            pred_df.to_csv(index=False).encode("utf-8"),
+            file_name="forecast_by_distance.csv",
+            mime="text/csv"
+        )
+
+else:
+    t_str = st.text_input(
+        "Времена (h:mm:ss или m:ss), разделени със запетая",
+        value="3:00, 12:00, 30:00, 1:00:00"
+    )
+    raw_items = [x.strip() for x in t_str.split(",") if x.strip()]
+    # парсваме към минути (float)
+    t_minutes = []
+    for x in raw_items:
+        val = parse_time_to_minutes(x)
+        if val is not None:
+            t_minutes.append((x, float(val)))  # (оригинален текст, минути)
+
+    if t_minutes:
+        rows = []
+        for txt, T in t_minutes:
+            # идеал
+            si = float(s_id_f(T)); vi = float(v_id_f(si))
+            # личен (без мод.)
+            sp = float(s_p_f(T));  vp = float(v_p_f(sp))
+            # личен (модулиран)
+            spm = float(s_pm_f(T)); vpm = float(v_pm_f(spm))
+
+            rows.append({
+                "time_input": txt,
+                "ideal_distance_km": si,
+                "personal_distance_km": sp,
+                "mod_distance_km": spm if use_mod else np.nan,
+                "ideal (time + pace)":    pretty_time_with_pace(T, vi),
+                "personal (time + pace)": pretty_time_with_pace(T, vp),
+                "modulated (time + pace)": pretty_time_with_pace(T, vpm) if use_mod else "",
+                "ideal_speed_kmh": round(vi, 2),
+                "personal_speed_kmh": round(vp, 2),
+                "mod_speed_kmh": round(vpm, 2) if use_mod else np.nan
+            })
+
+        pred_df = pd.DataFrame(rows).sort_values("time_input")
+        st.dataframe(pred_df, use_container_width=True)
+        st.download_button(
+            "Свали прогноза (по време) CSV",
+            pred_df.to_csv(index=False).encode("utf-8"),
+            file_name="forecast_by_time.csv",
+            mime="text/csv"
+        )
 
 
 
