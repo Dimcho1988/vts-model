@@ -13,6 +13,40 @@ st.title("vts-model • Velocity–Time–Distance модел")
 
 st.sidebar.header("Настройки")
 
+# -------------------------
+# Helpers for pretty time & pace
+# -------------------------
+def fmt_hmm_from_minutes(mins: float) -> str:
+    if mins is None or mins <= 0:
+        return "-"
+    h = int(mins // 60)
+    m = int(round(mins - 60*h))
+    if h > 0:
+        return f"{h}:{m:02d}"   # 2:15
+    # за кратки времена можеш да смениш на mm:ss логика при нужда
+    return f"{m} мин"
+
+def fmt_hhmm_text(mins: float) -> str:
+    if mins is None or mins <= 0:
+        return "-"
+    h = int(mins // 60)
+    m = int(round(mins - 60*h))
+    if h > 0:
+        return f"{h} ч {m} мин"
+    return f"{m} мин"
+
+def pace_str_from_speed(speed_kmh: float) -> str:
+    # speed km/h -> pace min/km
+    if speed_kmh is None or speed_kmh <= 0:
+        return "-"
+    pace_min = 60.0 / speed_kmh
+    mm = int(pace_min)
+    ss = int(round((pace_min - mm) * 60))
+    if ss == 60:
+        mm += 1
+        ss = 0
+    return f"{mm}:{ss:02d}/км"
+
 # =========================
 # Зареждане на идеалните данни
 # =========================
@@ -26,26 +60,43 @@ else:
     csv_path = default_csv
 
 # =========================
-# Реални точки (едитируеми)
+# Реални точки (гъвкаво въвеждане)
 # =========================
-st.sidebar.subheader("Реални точки (една или повече)")
-st.sidebar.markdown("Видове: **DS** (distance, speed), **VT** (distance, time), **SV** (speed, time)")
+st.sidebar.subheader("Реални точки (въведи две от трите полета)")
+st.sidebar.caption("За всеки ред попълни поне ДВЕ полета: дистанция (km), време (min), скорост (km/h).")
 
 pts_df = st.sidebar.data_editor(
     pd.DataFrame({
-        "kind": ["DS", "VT"],
-        "a":    [1.0, 5.0],
-        "b":    [16.0, 20.0],  # speed km/h ИЛИ time min (според вида)
+        "distance_km": [1.0, 5.0],
+        "time_min":    [3.5, 20.0],
+        "speed_kmh":   [np.nan, np.nan],
     }),
     num_rows="dynamic",
     use_container_width=True,
-    key="points_editor"
+    key="points_editor_v2"
 )
 
 points = []
-for _, row in pts_df.dropna().iterrows():
+for _, row in pts_df.iterrows():
+    d = row.get("distance_km")
+    t = row.get("time_min")
+    v = row.get("speed_kmh")
+    have_d = pd.notna(d)
+    have_t = pd.notna(t)
+    have_v = pd.notna(v)
     try:
-        points.append(RealPoint(kind=str(row["kind"]), a=float(row["a"]), b=float(row["b"])))
+        if have_d and have_t:
+            # VT: distance, time
+            points.append(RealPoint(kind="VT", a=float(d), b=float(t)))
+        elif have_t and have_v:
+            # SV: speed, time
+            points.append(RealPoint(kind="SV", a=float(v), b=float(t)))
+        elif have_d and have_v:
+            # DS: distance, speed
+            points.append(RealPoint(kind="DS", a=float(d), b=float(v)))
+        else:
+            # по-малко от две полета – игнорирай
+            pass
     except Exception:
         pass
 
@@ -82,7 +133,6 @@ personal_mod = PersonalizedModel(ideal=ideal, r_func=r_func_mod)
 # =========================
 # ОБОГАТЕНА ТАБЛИЦА: Идеал + лични (без мод.) + модул.
 # =========================
-# Намираме имената на колоните от CSV
 _df = ideal_df.copy().reset_index(drop=True)
 s_col, t_col = None, None
 for c in _df.columns:
@@ -112,17 +162,41 @@ else:
     dev_no_mod = (v_p_vals/(v_id_vals + 1e-9) - 1.0) * 100.0
     dev_mod    = (v_pm_vals/(v_id_vals + 1e-9) - 1.0) * 100.0
 
+    # Форматирани времена и темпо
+    ideal_time_hmm = [fmt_hmm_from_minutes(x) for x in t_id_vals]
+    ideal_time_text = [fmt_hhmm_text(x) for x in t_id_vals]
+    personal_time_hmm = [fmt_hmm_from_minutes(x) for x in t_p_vals]
+    personal_time_text = [fmt_hhmm_text(x) for x in t_p_vals]
+    mod_time_hmm = [fmt_hmm_from_minutes(x) for x in t_pm_vals]
+    mod_time_text = [fmt_hhmm_text(x) for x in t_pm_vals]
+
+    ideal_pace = [pace_str_from_speed(x) for x in v_id_vals]
+    personal_pace = [pace_str_from_speed(x) for x in v_p_vals]
+    mod_pace = [pace_str_from_speed(x) for x in v_pm_vals]
+
     enriched = pd.DataFrame({
         "distance_km": s_vals,
+
         "ideal_time_min": t_id_vals,
+        "ideal_time": ideal_time_hmm,                 # 2:15
+        "ideal_time_text": ideal_time_text,           # 2 ч 15 мин
         "ideal_speed_kmh": v_id_vals,
+        "ideal_pace": ideal_pace,                     # мин/км
+
         "r_no_mod": np.maximum(1e-6, v_p_vals/(v_id_vals + 1e-9)),
         "personal_time_min": t_p_vals,
+        "personal_time": personal_time_hmm,
+        "personal_time_text": personal_time_text,
         "personal_speed_kmh": v_p_vals,
+        "personal_pace": personal_pace,
         "deviation_no_mod_%": dev_no_mod,
+
         "r_mod": np.maximum(1e-6, v_pm_vals/(v_id_vals + 1e-9)),
         "mod_time_min": t_pm_vals,
+        "mod_time": mod_time_hmm,
+        "mod_time_text": mod_time_text,
         "mod_speed_kmh": v_pm_vals,
+        "mod_pace": mod_pace,
         "deviation_mod_%": dev_mod,
     }).sort_values("distance_km")
 
@@ -192,7 +266,7 @@ with cols[1]:
     st.metric("W' / D' (m)", f"{Dp_p_km*1000:.0f}")
 
 # =========================
-# ПРОГНОЗА: скорост–време–път (по избор)
+# Допълнителна ПРОГНОЗА (по избор): по дистанция / по време
 # =========================
 st.header("Прогноза (скорост–време–път)")
 mode = st.radio("Режим на прогноза",
@@ -219,9 +293,12 @@ if mode.startswith("По дистанция"):
             vpm, tpm = float(v_pm_f(s)), float(t_pm_f(s))
             rows.append({
                 "distance_km": s,
-                "ideal_time_min": ti, "ideal_speed_kmh": vi,
-                "personal_time_min": tp, "personal_speed_kmh": vp,
-                "mod_time_min": tpm, "mod_speed_kmh": vpm,
+                "ideal_time_min": ti, "ideal_time": fmt_hmm_from_minutes(ti),
+                "ideal_speed_kmh": vi, "ideal_pace": pace_str_from_speed(vi),
+                "personal_time_min": tp, "personal_time": fmt_hmm_from_minutes(tp),
+                "personal_speed_kmh": vp, "personal_pace": pace_str_from_speed(vp),
+                "mod_time_min": tpm, "mod_time": fmt_hmm_from_minutes(tpm),
+                "mod_speed_kmh": vpm, "mod_pace": pace_str_from_speed(vpm),
                 "deviation_no_mod_%": (vp/max(vi,1e-9)-1.0)*100.0,
                 "deviation_mod_%": (vpm/max(vi,1e-9)-1.0)*100.0,
             })
@@ -246,9 +323,9 @@ else:
             spm = float(s_pm_f(T)); vpm = float(v_pm_f(spm))
             rows.append({
                 "time_min": T,
-                "ideal_distance_km": si, "ideal_speed_kmh": vi,
-                "personal_distance_km": sp, "personal_speed_kmh": vp,
-                "mod_distance_km": spm, "mod_speed_kmh": vpm,
+                "ideal_distance_km": si, "ideal_speed_kmh": vi, "ideal_pace": pace_str_from_speed(vi),
+                "personal_distance_km": sp, "personal_speed_kmh": vp, "personal_pace": pace_str_from_speed(vp),
+                "mod_distance_km": spm, "mod_speed_kmh": vpm, "mod_pace": pace_str_from_speed(vpm),
                 "deviation_no_mod_%": (vp/max(vi,1e-9)-1.0)*100.0,
                 "deviation_mod_%": (vpm/max(vi,1e-9)-1.0)*100.0,
             })
@@ -258,27 +335,6 @@ else:
                            pred_df.to_csv(index=False).encode("utf-8"),
                            file_name="forecast_by_time.csv", mime="text/csv")
 
-# =========================
-# Експорт на криви (за справка)
-# =========================
-st.subheader("Експорт на криви (за справка)")
-out_ready = pd.DataFrame({
-    "distance_km": s_grid,
-    "v_ideal_kmh": v_id,
-    "t_ideal_min": t_id,
-    "r_no_mod": r_grid,
-    "v_personal_kmh": v_p,
-    "t_personal_min": t_p,
-    "r_mod": r_grid_mod,
-    "v_personal_mod_kmh": v_pm,
-    "t_personal_mod_min": t_pm,
-})
-st.download_button("Свали персонализирани криви (CSV)",
-                   out_ready.to_csv(index=False).encode("utf-8"),
-                   file_name="vts_personalized_curves.csv",
-                   mime="text/csv")
-
-st.caption("Модулацията по W' влияе само на прогнозните криви/таблици, не и на CS/W'. Входни видове: ‘DS’=Distance–Speed, ‘VT’=Distance–Time, ‘SV’=Speed–Time.")
-
+st.caption("Модулацията по W' влияе само на прогнозните криви/таблици, не и на CS/W'. Въвеждай по две от трите полета (дистанция/време/скорост) за всяка реална точка.")
 
 
