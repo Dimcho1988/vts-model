@@ -65,12 +65,13 @@ def pretty_time_with_pace(minutes: float, speed_kmh: float) -> str:
 # Parse time inputs like "1:02:30", "4:26", "26.5"
 # -------------------------
 def parse_time_to_minutes(val) -> float | None:
-    """Приема ч:мм:сс, м:сс или десетично число и връща минути."""
+    """Приема ч:мм:сс, м:сс, м:сс.д или десетични минути и връща минути."""
     if val is None:
         return None
     s = str(val).strip()
     if not s:
         return None
+    # ако вече е десетично число (в минути)
     try:
         return float(s)
     except:
@@ -102,22 +103,23 @@ else:
     csv_path = default_csv
 
 # =========================
-# Реални точки (гъвкаво въвеждане)
+# Реални точки (въвеждаш ДВЕ от ТРИТЕ: distance_km / time / speed_kmh)
 # =========================
 st.sidebar.subheader("Реални точки (въведи две от трите полета)")
-st.sidebar.caption("Попълни за всеки ред поне ДВЕ полета: дистанция (km), време (ч:мм:сс или м:сс), скорост (km/h).")
+st.sidebar.caption("Попълни за всеки ред поне ДВЕ полета: дистанция (km), време (ч:мм:сс или м:сс или м:сс.д), скорост (km/h).")
 
 pts_df = st.sidebar.data_editor(
     pd.DataFrame({
         "distance_km": [2.0, 10.0],
-        "time": ["4:26", "26:28"],  # въвеждай в този формат (или десетични минути)
-        "speed_kmh": [np.nan, np.nan],
+        "time": ["4:26", "26:28"],      # време като текст: h:mm:ss / m:ss / m:ss.t
+        "speed_kmh": [np.nan, np.nan],  # по избор
     }),
     num_rows="dynamic",
     use_container_width=True,
     key="points_editor_v3"
 )
 
+# Конвертираме входните редове в RealPoint (VT/SV/DS) според наличните две полета
 points = []
 for _, row in pts_df.iterrows():
     d = row.get("distance_km")
@@ -208,7 +210,7 @@ else:
     st.dataframe(table, use_container_width=True)
 
 # =========================
-# Криви за графики (ИМА ги отново)
+# Криви за графики (същите три таба)
 # =========================
 # Грид за рисуване
 s_grid = np.linspace(float(ideal.s_km[0]), float(ideal.s_km[-1]), 600)
@@ -254,7 +256,6 @@ with tab3:
     fig3.add_trace(go.Scatter(x=s_grid, y=(r_grid-1.0)*100.0, mode="lines", name="% отклонение (без мод.)"))
     if use_mod:
         fig3.add_trace(go.Scatter(x=s_grid, y=(r_grid_mod-1.0)*100.0, mode="lines", name="% отклонение (модул.)"))
-    # входните точки (ако има DS/VT/SV)
     if len(s_pts) > 0:
         fig3.add_trace(go.Scatter(x=s_pts, y=(r_pts-1.0)*100.0, mode="markers", name="Входни точки"))
     fig3.update_layout(xaxis_title="Дистанция (km)", yaxis_title="Отклонение по скорост (%)", height=520, legend_orientation="h")
@@ -271,5 +272,6 @@ with cols[0]:
 with cols[1]:
     st.metric("CS реален (km/h)", f"{CS_p_kmh:.2f}")
     st.metric("W' реален (m)", f"{Dp_p_km*1000:.0f}")
+
 
 
