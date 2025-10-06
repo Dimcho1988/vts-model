@@ -272,6 +272,74 @@ with cols[0]:
 with cols[1]:
     st.metric("CS реален (km/h)", f"{CS_p_kmh:.2f}")
     st.metric("W' реален (m)", f"{Dp_p_km*1000:.0f}")
+# =========================
+# ЗОНИ СПРЯМО КРИТИЧНАТА СКОРОСТ (CS) – редактираща се таблица
+# =========================
+st.header("Зони на натоварване спрямо критична скорост (CS)")
+
+if CS_p_kmh is None or CS_p_kmh <= 0:
+    st.warning("Няма изчислена лична CS. Добави реални точки, за да получиш CS и да генерираме зони.")
+else:
+    st.caption(f"Изчислена лична CS: **{CS_p_kmh:.2f} km/h**  (темпо {pace_str_from_speed(CS_p_kmh)})")
+
+    # Начален шаблон за зони (редактиращ се)
+    default_zones = pd.DataFrame({
+        "zone": ["Z1 (възстановяване)", "Z2 (лека)", "Z3 (темпо)", "Z4 (праг)", "Z5 (интервали)"],
+        "low_%CS": [60, 80, 90, 100, 105],
+        "high_%CS": [80, 90, 100, 105, 120],   # можеш да смениш и да добавиш нови редове
+        "note": ["много леко", "леко", "устойчиво", "лактатен праг", "висока интензивност"]
+    })
+
+    st.write("Редактирай процентите от CS по твоя модел. Можеш да добавяш/триeш редове.")
+    zones_input = st.data_editor(
+        default_zones,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="zones_editor_percent_cs"
+    )
+
+    # Пресмятане на таблицата със скорости/темпа
+    rows = []
+    for _, r in zones_input.iterrows():
+        try:
+            name = str(r.get("zone", "")).strip()
+            lo = float(r.get("low_%CS", np.nan))
+            hi = float(r.get("high_%CS", np.nan))
+        except Exception:
+            continue
+
+        if not name or np.isnan(lo) or np.isnan(hi):
+            continue
+        if hi < lo:
+            lo, hi = hi, lo  # swap за безопасност
+
+        speed_lo = CS_p_kmh * (lo / 100.0)
+        speed_hi = CS_p_kmh * (hi / 100.0)
+
+        rows.append({
+            "zone": name,
+            "low_%CS": lo,
+            "high_%CS": hi,
+            "speed_low_kmh": round(speed_lo, 2),
+            "speed_high_kmh": round(speed_hi, 2),
+            "pace_low": pace_str_from_speed(speed_hi),   # по-бързата граница = по-ниско темпо
+            "pace_high": pace_str_from_speed(speed_lo),
+            "note": r.get("note", "")
+        })
+
+    zones_table = pd.DataFrame(rows)
+
+    # Пояснение за темпото
+    st.caption("Забележка: в колоните „pace_low/pace_high“ по-ниската стойност е по-бърза (обратнопропорционална на скоростта).")
+
+    # Показване + експорт
+    st.dataframe(zones_table, use_container_width=True)
+    st.download_button(
+        "Свали зоните като CSV",
+        zones_table.to_csv(index=False).encode("utf-8"),
+        file_name="cs_zones.csv",
+        mime="text/csv"
+    )
 
 
 
