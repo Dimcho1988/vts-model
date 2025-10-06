@@ -14,29 +14,45 @@ st.title("vts-model • Velocity–Time–Distance модел")
 st.sidebar.header("Настройки")
 
 # -------------------------
-# Helpers for pretty time & pace
+# Helpers: time & pace formatting
 # -------------------------
-def fmt_hmm_from_minutes(mins: float) -> str:
+def fmt_time_hms_from_minutes(mins: float) -> str:
+    """
+    Форматира минути -> h:mm:ss / m:ss / m:ss.t (за много къси).
+    Правило:
+      - < 5 мин: m:ss.t (десета)
+      - 5–60 мин: m:ss
+      - ≥ 60 мин: h:mm:ss
+    """
     if mins is None or mins <= 0:
         return "-"
-    h = int(mins // 60)
-    m = int(round(mins - 60*h))
-    if h > 0:
-        return f"{h}:{m:02d}"   # 2:15
-    # за кратки времена можеш да смениш на mm:ss логика при нужда
-    return f"{m} мин"
-
-def fmt_hhmm_text(mins: float) -> str:
-    if mins is None or mins <= 0:
-        return "-"
-    h = int(mins // 60)
-    m = int(round(mins - 60*h))
-    if h > 0:
-        return f"{h} ч {m} мин"
-    return f"{m} мин"
+    total_seconds = mins * 60.0
+    if total_seconds < 5 * 60:  # m:ss.t
+        m = int(total_seconds // 60)
+        s = total_seconds - m * 60
+        return f"{m}:{s:04.1f}"  # например 2:15.7
+    elif total_seconds < 60 * 60:  # m:ss
+        m = int(total_seconds // 60)
+        s = int(round(total_seconds - m * 60))
+        if s == 60:
+            m += 1
+            s = 0
+        return f"{m}:{s:02d}"
+    else:  # h:mm:ss
+        h = int(total_seconds // 3600)
+        rem = total_seconds - h * 3600
+        m = int(rem // 60)
+        s = int(round(rem - m * 60))
+        if s == 60:
+            m += 1
+            s = 0
+        if m == 60:
+            h += 1
+            m = 0
+        return f"{h}:{m:02d}:{s:02d}"
 
 def pace_str_from_speed(speed_kmh: float) -> str:
-    # speed km/h -> pace min/km
+    """speed km/h -> pace min/km (mm:ss/км)."""
     if speed_kmh is None or speed_kmh <= 0:
         return "-"
     pace_min = 60.0 / speed_kmh
@@ -46,6 +62,10 @@ def pace_str_from_speed(speed_kmh: float) -> str:
         mm += 1
         ss = 0
     return f"{mm}:{ss:02d}/км"
+
+def pretty_time_with_pace(minutes: float, speed_kmh: float) -> str:
+    """Комбинира време (динамичен формат) + темпо в една колона."""
+    return f"{fmt_time_hms_from_minutes(minutes)} ({pace_str_from_speed(speed_kmh)})"
 
 # =========================
 # Зареждане на идеалните данни
@@ -86,17 +106,11 @@ for _, row in pts_df.iterrows():
     have_v = pd.notna(v)
     try:
         if have_d and have_t:
-            # VT: distance, time
             points.append(RealPoint(kind="VT", a=float(d), b=float(t)))
         elif have_t and have_v:
-            # SV: speed, time
             points.append(RealPoint(kind="SV", a=float(v), b=float(t)))
         elif have_d and have_v:
-            # DS: distance, speed
             points.append(RealPoint(kind="DS", a=float(d), b=float(v)))
-        else:
-            # по-малко от две полета – игнорирай
-            pass
     except Exception:
         pass
 
@@ -131,7 +145,7 @@ else:
 personal_mod = PersonalizedModel(ideal=ideal, r_func=r_func_mod)
 
 # =========================
-# ОБОГАТЕНА ТАБЛИЦА: Идеал + лични (без мод.) + модул.
+# ОБОГАТЕНА ТАБЛИЦА: Идеал + лични (без мод.) + модул. (компактен вид)
 # =========================
 _df = ideal_df.copy().reset_index(drop=True)
 s_col, t_col = None, None
@@ -150,61 +164,32 @@ else:
     t_id_vals = _df[t_col].astype(float).values
     v_id_vals = s_vals / (t_id_vals/60.0 + 1e-9)
 
-    # Лични (без мод.) стойности върху идеалните дистанции
+    # Лични (без мод.) върху идеалните дистанции
     v_p_vals = personal.v_of_s()(s_vals)
     t_p_vals = 60.0 * s_vals / (v_p_vals + 1e-9)
 
-    # Модулирани стойности
+    # Модулирани
     v_pm_vals = personal_mod.v_of_s()(s_vals)
     t_pm_vals = 60.0 * s_vals / (v_pm_vals + 1e-9)
 
-    # Отклонения (% по скорост) спрямо идеала
+    # Отклонения (% по скорост)
     dev_no_mod = (v_p_vals/(v_id_vals + 1e-9) - 1.0) * 100.0
     dev_mod    = (v_pm_vals/(v_id_vals + 1e-9) - 1.0) * 100.0
 
-    # Форматирани времена и темпо
-    ideal_time_hmm = [fmt_hmm_from_minutes(x) for x in t_id_vals]
-    ideal_time_text = [fmt_hhmm_text(x) for x in t_id_vals]
-    personal_time_hmm = [fmt_hmm_from_minutes(x) for x in t_p_vals]
-    personal_time_text = [fmt_hhmm_text(x) for x in t_p_vals]
-    mod_time_hmm = [fmt_hmm_from_minutes(x) for x in t_pm_vals]
-    mod_time_text = [fmt_hhmm_text(x) for x in t_pm_vals]
-
-    ideal_pace = [pace_str_from_speed(x) for x in v_id_vals]
-    personal_pace = [pace_str_from_speed(x) for x in v_p_vals]
-    mod_pace = [pace_str_from_speed(x) for x in v_pm_vals]
-
-    enriched = pd.DataFrame({
+    table = pd.DataFrame({
         "distance_km": s_vals,
-
-        "ideal_time_min": t_id_vals,
-        "ideal_time": ideal_time_hmm,                 # 2:15
-        "ideal_time_text": ideal_time_text,           # 2 ч 15 мин
-        "ideal_speed_kmh": v_id_vals,
-        "ideal_pace": ideal_pace,                     # мин/км
-
-        "r_no_mod": np.maximum(1e-6, v_p_vals/(v_id_vals + 1e-9)),
-        "personal_time_min": t_p_vals,
-        "personal_time": personal_time_hmm,
-        "personal_time_text": personal_time_text,
-        "personal_speed_kmh": v_p_vals,
-        "personal_pace": personal_pace,
+        "ideal (time + pace)": [pretty_time_with_pace(t, v) for t, v in zip(t_id_vals, v_id_vals)],
+        "personal (time + pace)": [pretty_time_with_pace(t, v) for t, v in zip(t_p_vals, v_p_vals)],
+        "modulated (time + pace)": [pretty_time_with_pace(t, v) for t, v in zip(t_pm_vals, v_pm_vals)],
         "deviation_no_mod_%": dev_no_mod,
-
-        "r_mod": np.maximum(1e-6, v_pm_vals/(v_id_vals + 1e-9)),
-        "mod_time_min": t_pm_vals,
-        "mod_time": mod_time_hmm,
-        "mod_time_text": mod_time_text,
-        "mod_speed_kmh": v_pm_vals,
-        "mod_pace": mod_pace,
         "deviation_mod_%": dev_mod,
     }).sort_values("distance_km")
 
-    st.dataframe(enriched, use_container_width=True)
+    st.dataframe(table, use_container_width=True)
     st.download_button(
         "Свали таблицата (CSV)",
-        enriched.to_csv(index=False).encode("utf-8"),
-        file_name="ideal_plus_predictions.csv",
+        table.to_csv(index=False).encode("utf-8"),
+        file_name="ideal_plus_predictions_compact.csv",
         mime="text/csv"
     )
 
@@ -266,7 +251,7 @@ with cols[1]:
     st.metric("W' / D' (m)", f"{Dp_p_km*1000:.0f}")
 
 # =========================
-# Допълнителна ПРОГНОЗА (по избор): по дистанция / по време
+# Допълнителна ПРОГНОЗА: по дистанция / по време (компактни колони)
 # =========================
 st.header("Прогноза (скорост–време–път)")
 mode = st.radio("Режим на прогноза",
@@ -293,12 +278,9 @@ if mode.startswith("По дистанция"):
             vpm, tpm = float(v_pm_f(s)), float(t_pm_f(s))
             rows.append({
                 "distance_km": s,
-                "ideal_time_min": ti, "ideal_time": fmt_hmm_from_minutes(ti),
-                "ideal_speed_kmh": vi, "ideal_pace": pace_str_from_speed(vi),
-                "personal_time_min": tp, "personal_time": fmt_hmm_from_minutes(tp),
-                "personal_speed_kmh": vp, "personal_pace": pace_str_from_speed(vp),
-                "mod_time_min": tpm, "mod_time": fmt_hmm_from_minutes(tpm),
-                "mod_speed_kmh": vpm, "mod_pace": pace_str_from_speed(vpm),
+                "ideal (time + pace)": pretty_time_with_pace(ti, vi),
+                "personal (time + pace)": pretty_time_with_pace(tp, vp),
+                "modulated (time + pace)": pretty_time_with_pace(tpm, vpm),
                 "deviation_no_mod_%": (vp/max(vi,1e-9)-1.0)*100.0,
                 "deviation_mod_%": (vpm/max(vi,1e-9)-1.0)*100.0,
             })
@@ -323,9 +305,12 @@ else:
             spm = float(s_pm_f(T)); vpm = float(v_pm_f(spm))
             rows.append({
                 "time_min": T,
-                "ideal_distance_km": si, "ideal_speed_kmh": vi, "ideal_pace": pace_str_from_speed(vi),
-                "personal_distance_km": sp, "personal_speed_kmh": vp, "personal_pace": pace_str_from_speed(vp),
-                "mod_distance_km": spm, "mod_speed_kmh": vpm, "mod_pace": pace_str_from_speed(vpm),
+                "ideal_distance_km": si,
+                "personal_distance_km": sp,
+                "mod_distance_km": spm,
+                "ideal (time + pace)": pretty_time_with_pace(T, vi),
+                "personal (time + pace)": pretty_time_with_pace(T, vp),
+                "modulated (time + pace)": pretty_time_with_pace(T, vpm),
                 "deviation_no_mod_%": (vp/max(vi,1e-9)-1.0)*100.0,
                 "deviation_mod_%": (vpm/max(vi,1e-9)-1.0)*100.0,
             })
@@ -335,6 +320,6 @@ else:
                            pred_df.to_csv(index=False).encode("utf-8"),
                            file_name="forecast_by_time.csv", mime="text/csv")
 
-st.caption("Модулацията по W' влияе само на прогнозните криви/таблици, не и на CS/W'. Въвеждай по две от трите полета (дистанция/време/скорост) за всяка реална точка.")
+st.caption("Времето се показва динамично (h:mm:ss / m:ss / m:ss.t). Модулацията по W' влияе само на прогнозите, не и на CS/W'. Въвеждай по две от трите полета (дистанция/време/скорост) за всяка реална точка.")
 
 
