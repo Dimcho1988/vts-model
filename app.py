@@ -3,6 +3,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+# ⬇️ NEW: импорт за Strava таба
+from ui_strava import render_strava_tab
+
 from model_utils import (
     load_ideal, RealPoint, compute_r_samples, r_of_s_interpolator,
     PersonalizedModel, cs_w_from_two_times, modulate_r_by_wprime
@@ -272,6 +275,7 @@ with cols[0]:
 with cols[1]:
     st.metric("CS реален (km/h)", f"{CS_p_kmh:.2f}")
     st.metric("W' реален (m)", f"{Dp_p_km*1000:.0f}")
+
 # =========================
 # ЗОНИ СПРЯМО КРИТИЧНАТА СКОРОСТ (CS) – редактираща се таблица
 # =========================
@@ -340,6 +344,7 @@ else:
         file_name="cs_zones.csv",
         mime="text/csv"
     )
+
 # =========================
 # ПРОГНОЗА: по ДИСТАНЦИЯ или по ВРЕМЕ (реални конкретни стойности)
 # =========================
@@ -440,5 +445,10 @@ else:
             mime="text/csv"
         )
 
+# =========================
+# NEW: Strava интеграция (отделна секция най-отдолу)
+# =========================
+st.header("Strava интеграция")
+render_strava_tab()
 
 
