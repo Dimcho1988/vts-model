@@ -15,8 +15,8 @@ class HRSpeedModelState:
 
 @dataclass
 class HRSpeedModelConfig:
-    half_life_days: float = 14.0   # колко силно тежим скорошните точки
-    min_points: int = 60           # минимум 30-сек точки за фит
+    half_life_days: float = 14.0
+    min_points: int = 60
 
 def _weights_from_time(ts: pd.Series, half_life_days: float) -> np.ndarray:
     now = pd.Timestamp.utcnow().tz_localize("UTC")
@@ -37,31 +37,28 @@ def update_model(engine, athlete_id: int, cfg: HRSpeedModelConfig) -> Optional[H
     if df.empty or df.shape[0] < cfg.min_points:
         return None
 
-    # --- FIX: коректно tz обработване ---
-    df["point_time"] = pd.to_datetime(df["point_time"])
+    # --- фиксирано timezone обработване ---
+    ts = pd.to_datetime(df["point_time"], errors="coerce")
     try:
-        # ако е naive → локализираме към UTC
-        if df["point_time"].dt.tz is None:
-            df["point_time"] = df["point_time"].dt.tz_localize("UTC")
+        if getattr(ts.dtype, "tz", None) is None:
+            ts = ts.dt.tz_localize("UTC")
         else:
-            df["point_time"] = df["point_time"].dt.tz_convert("UTC")
+            ts = ts.dt.tz_convert("UTC")
     except Exception:
-        # fallback: насилствено локализирай към UTC, ако серията е смесена
-        df["point_time"] = pd.to_datetime(df["point_time"], utc=True)
+        ts = pd.to_datetime(df["point_time"], utc=True, errors="coerce")
 
+    df["point_time"] = ts
     df = df.dropna(subset=["hr", "speed_flat"])
 
     w = _weights_from_time(df["point_time"], cfg.half_life_days)
-    x = df["speed_flat"].astype(float).values  # m/s
+    x = df["speed_flat"].astype(float).values
     y = df["hr"].astype(float).values
 
-    # претеглени най-малки квадрати: y = a*x + b
     W = np.diag(w)
     X = np.vstack([x, np.ones_like(x)]).T
     beta = np.linalg.pinv(X.T @ W @ X) @ (X.T @ W @ y)
     a, b = float(beta[0]), float(beta[1])
 
-    # r^2
     y_pred = a * x + b
     ss_res = np.sum(w * (y - y_pred) ** 2)
     mu_w = np.average(y, weights=w)
@@ -79,6 +76,5 @@ def predict_speed_from_hr(state: HRSpeedModelState, hr: float) -> float:
     return (hr - state.b) / state.a
 
 def fatigue_index_for_workout(state: HRSpeedModelState, avg_hr: float, avg_vflat_ms: float) -> float:
-    """ v_real - v_pred (m/s). Отрицателно → умора. """
     v_pred = predict_speed_from_hr(state, avg_hr)
     return float(avg_vflat_ms - v_pred)
