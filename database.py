@@ -1,125 +1,115 @@
 import os
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import SQLAlchemyError
 import json
+import pandas as pd
+from sqlalchemy import create_engine, text
 
-# ===============================================
-# Database connection
-# ===============================================
-
+# --------------------------
+# Connection
+# --------------------------
 def get_engine():
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        raise RuntimeError("DATABASE_URL not set. Please configure Supabase URL in Streamlit secrets.")
-    return create_engine(db_url, pool_pre_ping=True)
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError("Set DATABASE_URL env var for Postgres (Supabase).")
+    return create_engine(url, pool_pre_ping=True)
 
-engine = get_engine()
-
-# ===============================================
-# Initialize tables (if not exist)
-# ===============================================
-
-def init_db():
-    schema_sql = """
-    create table if not exists workouts (
-        id serial primary key,
-        athlete_id bigint,
-        activity_id bigint unique,
-        start_time timestamptz,
-        duration_s float,
-        avg_hr float,
-        avg_speed_flat float,
-        raw_payload jsonb
-    );
-
-    create table if not exists zone_stats (
-        id serial primary key,
-        workout_id int references workouts(id) on delete cascade,
-        zone_label text,
-        zone_type text,
-        time_s float,
-        mean_hr float,
-        mean_speed_flat float
-    );
-    """
+# --------------------------
+# Schema init (reads schema.sql)
+# --------------------------
+def ensure_schema(engine):
+    schema_path = "schema.sql"
+    if not os.path.exists(schema_path):
+        raise RuntimeError("schema.sql not found in repo root.")
+    with open(schema_path, "r", encoding="utf-8") as f:
+        schema_sql = f.read()
     with engine.begin() as conn:
         conn.execute(text(schema_sql))
 
-# ===============================================
-# Insert or update workout
-# ===============================================
+# --------------------------
+# Upsert workout
+# --------------------------
+def upsert_workout(engine, athlete_id, activity_id, start_time, duration_s, avg_hr, avg_speed_flat, raw_payload):
+    sql = text("""
+        insert into workouts(athlete_id, activity_id, start_time, duration_s, avg_hr, avg_speed_flat, raw_payload)
+        values (:athlete_id, :activity_id, :start_time, :duration_s, :avg_hr, :avg_speed_flat, :raw_payload)
+        on conflict (activity_id) do update set
+          duration_s = excluded.duration_s,
+          avg_hr = excluded.avg_hr,
+          avg_speed_flat = excluded.avg_speed_flat,
+          raw_payload = excluded.raw_payload
+        returning id;
+    """)
+    with engine.begin() as conn:
+        rid = conn.execute(sql, {
+            "athlete_id": athlete_id,
+            "activity_id": activity_id,
+            "start_time": start_time,
+            "duration_s": duration_s,
+            "avg_hr": float(avg_hr) if avg_hr is not None else None,
+            "avg_speed_flat": float(avg_speed_flat) if avg_speed_flat is not None else None,
+            "raw_payload": json.dumps(raw_payload),
+        }).scalar()
+    return rid
 
-def upsert_workout(athlete_id, activity_id, start_time, duration_s, avg_hr, avg_speed_flat, raw_payload):
-    try:
-        with engine.begin() as conn:
-            insert_stmt = text("""
-                insert into workouts(athlete_id, activity_id, start_time, duration_s, avg_hr, avg_speed_flat, raw_payload)
-                values (:athlete_id, :activity_id, :start_time, :duration_s, :avg_hr, :avg_speed_flat, :raw_payload)
-                on conflict (activity_id) do update set
-                    duration_s = excluded.duration_s,
-                    avg_hr = excluded.avg_hr,
-                    avg_speed_flat = excluded.avg_speed_flat,
-                    raw_payload = excluded.raw_payload
-                returning id;
-            """)
-
-            result = conn.execute(insert_stmt, {
-                "athlete_id": athlete_id,
-                "activity_id": activity_id,
-                "start_time": start_time,
-                "duration_s": duration_s,
-                "avg_hr": avg_hr,
-                "avg_speed_flat": avg_speed_flat,
-                "raw_payload": json.dumps(raw_payload)
+# --------------------------
+# Insert zone stats (DataFrame from zoning.zone_tables)
+# --------------------------
+def insert_zone_stats(engine, activity_id, zone_tbl):
+    with engine.begin() as conn:
+        conn.execute(text("delete from workout_zone_stats where activity_id=:aid"), {"aid": activity_id})
+        for _, r in zone_tbl.iterrows():
+            conn.execute(text("""
+                insert into workout_zone_stats(activity_id, zone_type, zone_label, time_s, mean_hr, mean_speed_flat)
+                values (:aid, :ztype, :zlabel, :time_s, :mean_hr, :mean_speed_flat)
+            """), {
+                "aid": activity_id,
+                "ztype": r["zone_type"],
+                "zlabel": r["zone_label"],
+                "time_s": int(r["time_s"] or 0),
+                "mean_hr": float(r["mean_hr"]) if pd.notna(r["mean_hr"]) else None,
+                "mean_speed_flat": float(r["mean_speed_flat"]) if pd.notna(r["mean_speed_flat"]) else None,
             })
 
-            workout_id = result.scalar_one()
-            return workout_id
-    except SQLAlchemyError as e:
-        print("DB error in upsert_workout:", e)
-        return None
+# --------------------------
+# Store 30s points (for model)
+# --------------------------
+def insert_hr_speed_points(engine, athlete_id, activity_id, bin_df):
+    with engine.begin() as conn:
+        conn.execute(text("delete from hr_speed_points where activity_id=:aid"), {"aid": activity_id})
+        for t, r in bin_df.iterrows():
+            conn.execute(text("""
+                insert into hr_speed_points(athlete_id, activity_id, point_time, hr, speed_flat)
+                values (:athlete_id, :activity_id, :point_time, :hr, :speed_flat)
+            """), {
+                "athlete_id": athlete_id,
+                "activity_id": activity_id,
+                "point_time": t.to_pydatetime(),
+                "hr": float(r["hr"]) if pd.notna(r["hr"]) else None,
+                "speed_flat": float(r["v_flat"]) if pd.notna(r["v_flat"]) else None,
+            })
 
-# ===============================================
-# Insert zone stats (one workout → many zones)
-# ===============================================
+# --------------------------
+# Save model snapshot (optional)
+# --------------------------
+def upsert_model_snapshot(engine, athlete_id, model_json):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            insert into model_snapshots(athlete_id, model_json)
+            values (:athlete_id, :model_json)
+        """), {"athlete_id": athlete_id, "model_json": model_json})
 
-def insert_zone_stats(workout_id, zone_stats):
-    try:
-        with engine.begin() as conn:
-            # Delete old zones for this workout
-            conn.execute(text("delete from zone_stats where workout_id = :wid"), {"wid": workout_id})
-
-            # Insert new
-            for z in zone_stats:
-                conn.execute(text("""
-                    insert into zone_stats(workout_id, zone_label, zone_type, time_s, mean_hr, mean_speed_flat)
-                    values (:workout_id, :zone_label, :zone_type, :time_s, :mean_hr, :mean_speed_flat)
-                """), {
-                    "workout_id": workout_id,
-                    "zone_label": z.get("zone_label"),
-                    "zone_type": z.get("zone_type"),
-                    "time_s": z.get("time_s"),
-                    "mean_hr": z.get("mean_hr"),
-                    "mean_speed_flat": z.get("mean_speed_flat"),
-                })
-    except SQLAlchemyError as e:
-        print("DB error in insert_zone_stats:", e)
-
-# ===============================================
-# Load all zone stats for ACWR analysis
-# ===============================================
-
-def load_all_zone_stats():
-    try:
-        with engine.begin() as conn:
-            query = text("""
-                select w.start_time, z.zone_label, z.zone_type, z.time_s, z.mean_hr, z.mean_speed_flat
-                from zone_stats z
-                join workouts w on w.id = z.workout_id
-                order by w.start_time desc
-            """)
-            rows = conn.execute(query).fetchall()
-            return [dict(r._mapping) for r in rows]
-    except SQLAlchemyError as e:
-        print("DB error in load_all_zone_stats:", e)
-        return []
+# --------------------------
+# Helper for ACWR page
+# --------------------------
+def fetch_all_zone_daily(engine):
+    q = text("""
+        select w.athlete_id,
+               date(w.start_time) as day,
+               s.zone_type, s.zone_label,
+               sum((s.mean_speed_flat * (s.time_s/3600.0))) as zone_load
+          from workouts w
+          join workout_zone_stats s on s.activity_id = w.activity_id
+         group by 1,2,3,4
+         order by 1,2,3,4
+    """)
+    with engine.begin() as conn:
+        return pd.read_sql(q, conn)
