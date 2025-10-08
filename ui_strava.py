@@ -5,6 +5,7 @@ import numpy as np
 import plotly.express as px
 import streamlit as st
 from datetime import datetime, timezone
+from sqlalchemy import text  # <-- FIX: нужен за pd.read_sql(text(...))
 
 from strava_oauth import build_auth_url, exchange_code_for_token, refresh_token, token_is_expired
 from strava_api import StravaClient
@@ -73,7 +74,6 @@ def _client_from_token(token: dict) -> StravaClient:
             st.warning(f"Token refresh failed ({e}). Reconnect if needed.")
     return StravaClient(token["access_token"])
 
-# pace util (for zone table)
 def _pace_from_kmh(v_kmh: float) -> str:
     if v_kmh is None or v_kmh <= 0: return "-"
     pace_min = 60.0 / v_kmh
@@ -223,7 +223,6 @@ def render_strava_tab():
             st.write(f"a = {state.a:.3f} HR/(m/s) • b = {state.b:.1f} bpm • R² = {state.r2:.3f}")
 
             if cs_kmh_current:
-                # таблица със зони VTS стил + HR
                 vts_df = derive_hr_zones_from_speed(zones_input, cs_kmh_current, state)
                 st.subheader("Zones (VTS style) + HR ranges")
                 st.dataframe(vts_df, use_container_width=True)
@@ -248,7 +247,9 @@ def render_strava_tab():
                 # normalize time
                 w["start_time"] = pd.to_datetime(w["start_time"])
                 # FI per workout
-                if 'state' not in locals() or state is None:
+                model_cfg = HRSpeedModelConfig(half_life_days=14.0, min_points=60)
+                state = update_model(engine, athlete_id, model_cfg)
+                if state is None:
                     st.info("Model not ready -> FI/Training Index need the HR–speed model.")
                 else:
                     def _fi_row(r):
