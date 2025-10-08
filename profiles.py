@@ -90,27 +90,26 @@ def _zones_abs_from_perc(zperc: List[Dict[str, Any]], cs_kmh: Optional[float]) -
     return out
 
 def save_speed_zones_perc(engine, athlete_id: int, zones_df: pd.DataFrame, cs_kmh: Optional[float]) -> None:
-    """Записва зоните като % от CS + кешира абсолютните граници (km/h).
-       FIX: разделяме UPDATE и INSERT в отделни execute() извиквания.
-    """
+    """Записва зоните като % от CS + кешира абсолютните граници (km/h)."""
     ensure_profiles_schema(engine)
+
     zperc = _zones_perc_df_to_json(zones_df)
     zabs  = _zones_abs_from_perc(zperc, cs_kmh)
 
     with engine.begin() as c:
-        # 1) Update ако редът съществува
+        # 1) update ако редът съществува
         c.execute(text("""
             update user_profiles
-               set speed_zone_perc=:zperc::jsonb,
-                   speed_zone_abs=:zabs::jsonb,
-                   updated_at=now()
-             where athlete_id=:aid
+               set speed_zone_perc = :zperc,
+                   speed_zone_abs  = :zabs,
+                   updated_at      = now()
+             where athlete_id = :aid
         """), {"aid": athlete_id, "zperc": json.dumps(zperc), "zabs": json.dumps(zabs)})
 
-        # 2) Insert ако все още няма ред за този athlete_id
+        # 2) insert ако няма ред
         c.execute(text("""
             insert into user_profiles(athlete_id, speed_zone_perc, speed_zone_abs)
-            select :aid, :zperc::jsonb, :zabs::jsonb
+            select :aid, :zperc, :zabs
             where not exists (select 1 from user_profiles where athlete_id=:aid)
         """), {"aid": athlete_id, "zperc": json.dumps(zperc), "zabs": json.dumps(zabs)})
 
@@ -123,7 +122,6 @@ def get_profile(engine, athlete_id: int) -> Dict[str, Any]:
         ).mappings().first()
 
     if not row:
-        # ако няма ред – създай с default зони
         with engine.begin() as c:
             c.execute(
                 text("insert into user_profiles(athlete_id, speed_zone_perc) values (:aid, :z::jsonb) on conflict do nothing"),
@@ -148,3 +146,4 @@ def zones_df_from_profile(profile: Dict[str, Any], cs_kmh: Optional[float]) -> p
     if cs_kmh:
         cols += ["speed_low_kmh", "speed_high_kmh"]
     return df[cols]
+
