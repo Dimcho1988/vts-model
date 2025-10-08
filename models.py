@@ -1,6 +1,6 @@
 # models.py
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
@@ -15,15 +15,14 @@ class HRSpeedModelState:
 
 @dataclass
 class HRSpeedModelConfig:
-    half_life_days: float = 14.0  # колко силно тежим скорошните точки (по желание)
-    min_points: int = 60          # минимум 30-сек точки за фит
+    half_life_days: float = 14.0   # колко силно тежим скорошните точки
+    min_points: int = 60           # минимум 30-сек точки за фит
 
 def _weights_from_time(ts: pd.Series, half_life_days: float) -> np.ndarray:
     now = pd.Timestamp.utcnow().tz_localize("UTC")
-    age = (now - ts).dt.total_seconds() / (3600*24)
+    age_days = (now - ts).dt.total_seconds() / (3600 * 24)
     lam = np.log(2.0) / max(half_life_days, 0.1)
-    w = np.exp(-lam * age)
-    return w.values
+    return np.exp(-lam * age_days).values
 
 def update_model(engine, athlete_id: int, cfg: HRSpeedModelConfig) -> Optional[HRSpeedModelState]:
     q = text("""
@@ -34,27 +33,40 @@ def update_model(engine, athlete_id: int, cfg: HRSpeedModelConfig) -> Optional[H
     """)
     with engine.begin() as conn:
         df = pd.read_sql(q, conn, params={"aid": athlete_id})
+
     if df.empty or df.shape[0] < cfg.min_points:
         return None
 
-    df["point_time"] = pd.to_datetime(df["point_time"], utc=True)
-    df = df.dropna(subset=["hr","speed_flat"])
+    # --- FIX: коректно tz обработване ---
+    df["point_time"] = pd.to_datetime(df["point_time"])
+    try:
+        # ако е naive → локализираме към UTC
+        if df["point_time"].dt.tz is None:
+            df["point_time"] = df["point_time"].dt.tz_localize("UTC")
+        else:
+            df["point_time"] = df["point_time"].dt.tz_convert("UTC")
+    except Exception:
+        # fallback: насилствено локализирай към UTC, ако серията е смесена
+        df["point_time"] = pd.to_datetime(df["point_time"], utc=True)
+
+    df = df.dropna(subset=["hr", "speed_flat"])
+
     w = _weights_from_time(df["point_time"], cfg.half_life_days)
+    x = df["speed_flat"].astype(float).values  # m/s
+    y = df["hr"].astype(float).values
 
-    x = df["speed_flat"].values.astype(float)   # m/s
-    y = df["hr"].values.astype(float)
-
-    # претеглени най-малки квадрати за y = a*x + b
+    # претеглени най-малки квадрати: y = a*x + b
     W = np.diag(w)
     X = np.vstack([x, np.ones_like(x)]).T
     beta = np.linalg.pinv(X.T @ W @ X) @ (X.T @ W @ y)
     a, b = float(beta[0]), float(beta[1])
 
     # r^2
-    y_pred = a*x + b
-    ss_res = np.sum(w*(y - y_pred)**2)
-    ss_tot = np.sum(w*(y - np.average(y, weights=w))**2)
-    r2 = 1.0 - ss_res/ss_tot if ss_tot > 0 else 0.0
+    y_pred = a * x + b
+    ss_res = np.sum(w * (y - y_pred) ** 2)
+    mu_w = np.average(y, weights=w)
+    ss_tot = np.sum(w * (y - mu_w) ** 2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
 
     return HRSpeedModelState(a=a, b=b, r2=float(r2), updated_at=datetime.now(timezone.utc))
 
