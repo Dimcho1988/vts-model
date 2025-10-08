@@ -47,15 +47,18 @@ def update_model(engine, athlete_id: int, cfg: HRSpeedModelConfig) -> Optional[H
     if df.empty or df.shape[0] < cfg.min_points:
         return None
 
-    # robust timezone normalization
-    ts = pd.to_datetime(df["point_time"], errors="coerce")
+    # --- robust timezone normalization to UTC (handles mixed/aware/naive) ---
+    # опит 1: конвертиране към UTC ако серията вече е tz-aware
     try:
-        if getattr(ts.dtype, "tz", None) is None:
-            ts = ts.dt.tz_localize("UTC")
-        else:
-            ts = ts.dt.tz_convert("UTC")
+        ts = pd.to_datetime(df["point_time"], errors="coerce")
+        ts = ts.dt.tz_convert("UTC")
     except Exception:
-        ts = pd.to_datetime(df["point_time"], utc=True, errors="coerce")
+        # опит 2: локализиране към UTC ако е naive
+        try:
+            ts = pd.to_datetime(df["point_time"], errors="coerce").dt.tz_localize("UTC")
+        except Exception:
+            # опит 3 (fallback): насилствено парсване директно към UTC
+            ts = pd.to_datetime(df["point_time"], utc=True, errors="coerce")
 
     df["point_time"] = ts
     df = df.dropna(subset=["hr", "speed_flat"])
