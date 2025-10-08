@@ -1,4 +1,4 @@
-
+# ui_strava.py
 import os
 import json
 import pandas as pd
@@ -15,6 +15,10 @@ from acwr import zone_loads, compute_daily_acwr
 from models import HRSpeedModelConfig, HRSpeedModelState, update_model, fatigue_index_for_workout
 import database as db
 
+
+# -----------------------------
+# helpers for session token
+# -----------------------------
 def _get_token_from_state():
     tok = st.session_state.get("strava_token_json")
     if isinstance(tok, dict):
@@ -26,18 +30,74 @@ def _get_token_from_state():
             return None
     return None
 
+
 def _save_token_to_state(tok: dict):
     st.session_state["strava_token_json"] = tok
 
-def _handle_oauth_redirect():
-    code = st.query_params.get("code")
-    if code:
+
+# -----------------------------
+# robust query param getters
+# -----------------------------
+def _get_query_param(name: str):
+    """Works with newer st.query_params and older experimental API."""
+    try:
+        # Streamlit >= 1.33
+        return st.query_params.get(name)
+    except Exception:
+        # Older versions
+        qp = st.experimental_get_query_params()
+        val = qp.get(name)
+        if isinstance(val, list):
+            return val[0] if val else None
+        return val
+
+
+def _clear_query_params():
+    try:
+        st.query_params.clear()
+    except Exception:
         try:
-            token = exchange_code_for_token(code)
-            _save_token_to_state(token)
-            st.success("Strava connected! You can clear the URL params now.")
-        except Exception as e:
-            st.error(f"OAuth exchange failed: {e}")
+            st.experimental_set_query_params()
+        except Exception:
+            pass
+
+
+# -----------------------------
+# OAuth redirect handler (quiet)
+# -----------------------------
+def _handle_oauth_redirect():
+    """
+    Exchanges the ?code=... only once.
+    If token already present (e.g., page reloaded with same code), do nothing and clear URL.
+    """
+    code = _get_query_param("code")
+    error = _get_query_param("error")
+
+    # If Strava returned error and we are not connected yet -> show it
+    if error and not _get_token_from_state():
+        st.error(f"Strava auth error: {error}")
+        return
+
+    # No code present -> nothing to do
+    if not code:
+        return
+
+    # If we already have a token (reload / second exchange) -> just clear URL silently
+    if _get_token_from_state():
+        _clear_query_params()
+        return
+
+    # First and only exchange
+    try:
+        token = exchange_code_for_token(code)
+        _save_token_to_state(token)
+        st.success("Strava connected!")
+    except Exception:
+        # Most common cause: code already used -> don't scare user
+        st.info("Already authorized. If this appeared after a refresh, it's safe to ignore.")
+    finally:
+        _clear_query_params()
+
 
 def _client_from_token(token: dict) -> StravaClient:
     if token_is_expired(token):
@@ -48,9 +108,14 @@ def _client_from_token(token: dict) -> StravaClient:
             st.warning(f"Token refresh failed ({e}). Try reconnecting.")
     return StravaClient(token["access_token"])
 
+
+# =============================
+# MAIN UI ENTRY
+# =============================
 def render_strava_tab():
     st.header("Strava • Data → Zones → ACWR → Dynamic HR–Speed Model")
 
+    # ---- Database init ----
     db_ok = True
     try:
         engine = db.get_engine()
@@ -59,9 +124,8 @@ def render_strava_tab():
         db_ok = False
         st.error(f"Database not ready: {e}")
 
-    # Auth UI
-    with st.expander("1) Connect to Strava", expanded=True):
-        # OAuth path
+    # ---- Auth UI ----
+    with st.expander("Connect to Strava", expanded=True):
         auth_url = build_auth_url()
         if auth_url:
             st.markdown(f"[Authorize with Strava]({auth_url})")
@@ -79,7 +143,8 @@ def render_strava_tab():
         return
 
     client = _client_from_token(token)
-    athlete = None
+
+    # Fetch athlete
     try:
         athlete = client.get_athlete()
         st.success(f"Connected as: {athlete.get('firstname','')} {athlete.get('lastname','')} (id {athlete.get('id')})")
@@ -87,21 +152,22 @@ def render_strava_tab():
         st.error(f"Failed to fetch athlete: {e}")
         return
 
+    # ---- Zone config ----
     cfg = ZoneConfig(
         hrmax=st.number_input("HRmax", min_value=100, max_value=220, value=200, step=1),
     )
     st.caption("Adjust speed zone thresholds (m/s) as needed:")
     colz = st.columns(5)
-    labels = ["Z1","Z2","Z3","Z4","Z5"]
+    labels = ["Z1", "Z2", "Z3", "Z4", "Z5"]
     default_bounds = [cfg.speed_thresholds[z] for z in labels]
     new_bounds = []
-    for i,lab in enumerate(labels):
+    for i, lab in enumerate(labels):
         with colz[i]:
             new_bounds.append(st.number_input(lab, value=float(default_bounds[i]), step=0.1, format="%.2f"))
     cfg.speed_thresholds = dict(zip(labels, new_bounds))
 
-    # Activity list
-    per_page = st.selectbox("Activities per page", [10,20,30,50], index=2)
+    # ---- Activities paging ----
+    per_page = st.selectbox("Activities per page", [10, 20, 30, 50], index=2)
     page = st.number_input("Page", min_value=1, value=1, step=1)
 
     try:
@@ -114,11 +180,10 @@ def render_strava_tab():
     act_map = {f"{a['start_date'][:19]} • {a['name']} • {a['id']}": a for a in acts}
     choice = st.selectbox("Pick an activity to process", list(act_map.keys()))
     sel = act_map.get(choice)
-
     if sel is None:
         st.stop()
 
-    # Fetch streams
+    # ---- Process selected activity ----
     if st.button("Process selected activity"):
         with st.spinner("Fetching & processing..."):
             try:
@@ -130,7 +195,7 @@ def render_strava_tab():
                 # Zone tables
                 hr_tbl, spd_tbl = zone_tables(bdf, cfg)
 
-                # Visuals
+                # Visuals (tables)
                 st.subheader("Per-activity zone tables")
                 st.dataframe(hr_tbl)
                 st.dataframe(spd_tbl)
@@ -145,38 +210,31 @@ def render_strava_tab():
                         duration_s=duration_s,
                         avg_hr=avg_hr,
                         avg_speed_flat=avg_vflat,
-                        raw_payload={"activity": sel}
+                        raw_payload={"activity": sel},
                     )
                     db.insert_zone_stats(engine, sel["id"], hr_tbl)
                     db.insert_zone_stats(engine, sel["id"], spd_tbl)
                     db.insert_hr_speed_points(engine, athlete["id"], sel["id"], bdf)
                     st.success(f"Saved workout #{rid} and zone stats.")
 
-                # Charts
+                # Charts: HR / Speed over time
                 st.subheader("HR / Speed (flat) over time – 30s bins")
-                line_df = bdf.reset_index().rename(columns={"time":"Time","hr":"HR","v_flat":"Speed (flat m/s)"})
-                fig = px.line(line_df, x="Time", y=["HR","Speed (flat m/s)"])
+                line_df = bdf.reset_index().rename(columns={"time": "Time", "hr": "HR", "v_flat": "Speed (flat m/s)"})
+                fig = px.line(line_df, x="Time", y=["HR", "Speed (flat m/s)"])
                 st.plotly_chart(fig, use_container_width=True)
 
-                # Fatigue index (requires model)
+                # Fatigue index (simple dynamic model demo)
                 st.subheader("Dynamic HR→Speed model")
-                # Fetch all historic points for this athlete to fit/update a model
-                if db_ok:
-                    pts = db.fetch_all_zone_daily(engine)  # placeholder reuse; we will instead read hr_speed_points
-                # We'll do a quick on-the-fly model from this athlete's previous workouts avg values:
-                # (In production, query workouts table and maintain a stored model snapshot.)
-
-                # Quick & simple: fit/update from last N workouts avg pairs
-                # For demo: use current workout only to compute fatigue vs a default model
                 state = HRSpeedModelState(slope=0.02, intercept=0.0)
                 cfgm = HRSpeedModelConfig(ew_alpha=0.2)
-                # In a full pipeline you would aggregate past workouts' (avg_hr, avg_vflat) to update the model.
+                # (Може да добавиш реално обновяване на модела от исторически тренировки.)
                 fi = fatigue_index_for_workout(state, avg_hr, avg_vflat)
                 st.metric("Fatigue index (v_real - v_pred)", f"{fi:.3f} m/s", help="Negative => slower than expected (fatigue)")
 
             except Exception as e:
                 st.error(f"Processing failed: {e}")
 
+    # ---- ACWR by zone ----
     st.markdown("---")
     st.subheader("ACWR by zone")
     if db_ok:
@@ -188,10 +246,9 @@ def render_strava_tab():
                 acwr_df = compute_daily_acwr(all_zone, day_col="day", athlete_col="athlete_id")
                 st.dataframe(acwr_df.tail(30))
 
-                # Chart ACWR ratio per zone (selectable)
                 zones = sorted(acwr_df["zone_label"].unique())
                 zpick = st.selectbox("Zone", zones, index=0)
-                sub = acwr_df[(acwr_df["zone_label"]==zpick) & (acwr_df["zone_type"]=="speed")]
+                sub = acwr_df[(acwr_df["zone_label"] == zpick) & (acwr_df["zone_type"] == "speed")]
                 fig2 = px.line(sub.sort_values("day"), x="day", y="ratio", title=f"ACWR ratio – {zpick}")
                 st.plotly_chart(fig2, use_container_width=True)
         except Exception as e:
