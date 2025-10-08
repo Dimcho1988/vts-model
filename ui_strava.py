@@ -17,7 +17,9 @@ from profiles import (
     ensure_profiles_schema, upsert_user_minimal, save_hrmax, save_cs,
     get_profile, zones_df_from_profile, save_speed_zones_perc
 )
-from models import HRSpeedModelConfig, HRSpeedModelState, update_model, fatigue_index_for_workout, predict_hr
+from models import (
+    HRSpeedModelConfig, update_model, fatigue_index_for_workout, derive_hr_zones_from_speed
+)
 
 # ---------------- helpers ----------------
 def _get_token_from_state():
@@ -70,6 +72,15 @@ def _client_from_token(token: dict) -> StravaClient:
         except Exception as e:
             st.warning(f"Token refresh failed ({e}). Reconnect if needed.")
     return StravaClient(token["access_token"])
+
+# pace util (for zone table)
+def _pace_from_kmh(v_kmh: float) -> str:
+    if v_kmh is None or v_kmh <= 0: return "-"
+    pace_min = 60.0 / v_kmh
+    mm = int(pace_min)
+    ss = int(round((pace_min - mm) * 60))
+    if ss == 60: mm += 1; ss = 0
+    return f"{mm}:{ss:02d}/км"
 
 # ================ MAIN ================
 def render_strava_tab():
@@ -137,7 +148,7 @@ def render_strava_tab():
         if db_ok and cs_kmh_manual > 0:
             try: save_cs(engine, athlete_id, cs_kmh_manual)
             except Exception: pass
-    cs_kmh_current = cs_kmh_manual if cs_kmh_manual > 0 else cs_init or None
+    cs_kmh_current = cs_kmh_manual if cs_kmh_manual > 0 else (cs_init if cs_init > 0 else None)
 
     # ---- Speed zone thresholds (as %CS, persisted) ----
     st.caption("Speed zones are stored as % of CS in your profile. They are converted to absolute km/h when CS is known.")
@@ -177,8 +188,8 @@ def render_strava_tab():
                 cfg = ZoneConfig(hrmax=hrmax_val)
                 hr_tbl, spd_tbl = zone_tables(bdf, cfg)
                 st.subheader("Per-activity zone tables")
-                st.dataframe(hr_tbl)
-                st.dataframe(spd_tbl)
+                st.dataframe(hr_tbl, use_container_width=True)
+                st.dataframe(spd_tbl, use_container_width=True)
 
                 # Save to DB
                 if db_ok:
@@ -197,49 +208,64 @@ def render_strava_tab():
                 line_df = bdf.reset_index().rename(columns={"time":"Time","hr":"HR","v_flat":"Speed (flat m/s)"})
                 st.plotly_chart(px.line(line_df, x="Time", y=["HR","Speed (flat m/s)"]), use_container_width=True)
 
-                # ---- Dynamic HR = a·V + b model (from ALL history) ----
-                st.subheader("Dynamic HR = a·V + b model (from history)")
-                model_cfg = HRSpeedModelConfig(half_life_days=14.0, min_points=60)
-                state = update_model(engine, athlete_id, model_cfg)
-                if state is None:
-                    st.info("Not enough history to fit model yet (need ≥ 60 points).")
-                else:
-                    st.write(f"a={state.a:.3f} HR/(m/s),  b={state.b:.1f} bpm,  R²={state.r2:.3f}")
-                    fi = fatigue_index_for_workout(state, avg_hr, avg_vflat)
-                    st.metric("Fatigue index (v_real - v_pred)", f"{fi:.3f} m/s",
-                              help="Negative => slower than expected (fatigue)")
-
-                    # ---- HR zones derived from speed zones (table) ----
-                    if cs_kmh_current:
-                        zdf = zones_input.copy()
-                        zdf["speed_low_kmh"]  = (zdf["low_%CS"] /100.0) * cs_kmh_current
-                        zdf["speed_high_kmh"] = (zdf["high_%CS"]/100.0) * cs_kmh_current
-                    else:
-                        # ако няма CS – вземи от профила, ако има абсолютни
-                        if "speed_low_kmh" not in zones_default_df.columns:
-                            st.info("No CS set → cannot derive absolute speed zones.")
-                            zdf = None
-                        else:
-                            zdf = zones_default_df.copy()
-
-                    if zdf is not None:
-                        v_low_ms  = (zdf["speed_low_kmh"].astype(float)  / 3.6).values
-                        v_high_ms = (zdf["speed_high_kmh"].astype(float) / 3.6).values
-                        hr_low = [predict_hr(state, v) for v in v_low_ms]
-                        hr_high= [predict_hr(state, v) for v in v_high_ms]
-
-                        hr_zone_tbl = pd.DataFrame({
-                            "zone": zdf["zone"],
-                            "speed_low_kmh":  zdf["speed_low_kmh"].round(2),
-                            "speed_high_kmh": zdf["speed_high_kmh"].round(2),
-                            "hr_low_bpm":  np.round(hr_low).astype(int),
-                            "hr_high_bpm": np.round(hr_high).astype(int),
-                        })
-                        st.subheader("HR-zones derived from speed zones (via HR = a·V + b)")
-                        st.dataframe(hr_zone_tbl, use_container_width=True)
-
             except Exception as e:
                 st.error(f"Processing failed: {e}")
+
+    # ---- Dynamic model & HR zones table (VTS-style) ----
+    st.markdown("---")
+    st.subheader("Dynamic HR = a·V + b model (from history)")
+    try:
+        model_cfg = HRSpeedModelConfig(half_life_days=14.0, min_points=60)
+        state = update_model(engine, athlete_id, model_cfg)
+        if state is None:
+            st.info("Not enough history to fit model yet (need ≥ 60 points).")
+        else:
+            st.write(f"a = {state.a:.3f} HR/(m/s) • b = {state.b:.1f} bpm • R² = {state.r2:.3f}")
+
+            if cs_kmh_current:
+                # таблица със зони VTS стил + HR
+                vts_df = derive_hr_zones_from_speed(zones_input, cs_kmh_current, state)
+                st.subheader("Zones (VTS style) + HR ranges")
+                st.dataframe(vts_df, use_container_width=True)
+            else:
+                st.info("Set your CS to see speed/pace + HR zone table.")
+    except Exception as e:
+        st.error(f"Model error: {e}")
+
+    # ---- Fatigue & Training Index ----
+    st.markdown("---")
+    st.subheader("Fatigue & Training Index")
+    if db_ok:
+        try:
+            with engine.begin() as conn:
+                w = pd.read_sql(
+                    text("select start_time, avg_hr, avg_speed_flat from workouts where athlete_id=:aid order by start_time"),
+                    conn, params={"aid": athlete_id}
+                )
+            if w.empty:
+                st.info("No saved workouts yet.")
+            else:
+                # normalize time
+                w["start_time"] = pd.to_datetime(w["start_time"])
+                # FI per workout
+                if 'state' not in locals() or state is None:
+                    st.info("Model not ready -> FI/Training Index need the HR–speed model.")
+                else:
+                    def _fi_row(r):
+                        return fatigue_index_for_workout(state, float(r["avg_hr"]), float(r["avg_speed_flat"]))
+                    w["fatigue_index"] = w.apply(_fi_row, axis=1)
+                    # daily mean + 7-day rolling average as Training Index
+                    d = w.groupby(w["start_time"].dt.date)["fatigue_index"].mean().reset_index()
+                    d.rename(columns={"start_time":"day"}, inplace=True)
+                    d["training_index_7d"] = d["fatigue_index"].rolling(window=7, min_periods=1).mean()
+
+                    st.dataframe(d.tail(30), use_container_width=True)
+                    fig = px.line(d, x="day", y=["fatigue_index","training_index_7d"],
+                                  labels={"value":"m/s","variable":""},
+                                  title="Daily Fatigue (m/s) and 7-day Training Index")
+                    st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"Training index error: {e}")
 
     # ---- ACWR by zone ----
     st.markdown("---")
