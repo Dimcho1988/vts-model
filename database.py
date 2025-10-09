@@ -1,3 +1,11 @@
+import os
+import streamlit as st
+
+# Вземи DB URL директно от Secrets и го сложи в env,
+# за да го видят всички модули (вкл. database.py)
+if "DATABASE_URL" in st.secrets:
+    os.environ["DATABASE_URL"] = st.secrets["DATABASE_URL"]
+
 from __future__ import annotations
 import os
 from sqlalchemy import create_engine, text
