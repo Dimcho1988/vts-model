@@ -1,0 +1,11 @@
+streamlit>=1.36
+pandas>=2.1
+numpy>=1.26
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+altair>=5.0
+python-dateutil>=2.8
+requests>=2.31
+oauthlib>=3.2
+fastapi>=0.111
+uvicorn>=0.30
