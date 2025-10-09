@@ -1,6 +1,6 @@
 import requests, time, pandas as pd, numpy as np
 from datetime import datetime, timezone
-from . import database as db
+import database as db
 from .strava_auth import refresh_access_token
 
 API_BASE = "https://www.strava.com/api/v3"
