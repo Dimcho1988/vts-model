@@ -182,7 +182,7 @@ else:
 code = st.text_input("Paste ?code=... from Strava (first-time link)", value="")
 if st.button("Link Strava"):
     try:
-        js = exchange_code_for_token(STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, code)
+       js = exchange_code_for_token(STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, code, STRAVA_REDIRECT_URI)
         sid = js["athlete"]["id"]
         db.upsert_token(athlete_key, sid, js["access_token"], js["refresh_token"], js["expires_at"])
         st.success(f"Linked athlete {sid}.")
