@@ -172,35 +172,76 @@ st.header("Strava Sync")
 
 STRAVA_CLIENT_ID = st.secrets.get("STRAVA_CLIENT_ID", os.getenv("STRAVA_CLIENT_ID", ""))
 STRAVA_CLIENT_SECRET = st.secrets.get("STRAVA_CLIENT_SECRET", os.getenv("STRAVA_CLIENT_SECRET", ""))
-STRAVA_REDIRECT_URI = st.secrets.get("STRAVA_REDIRECT_URI", os.getenv("STRAVA_REDIRECT_URI", "http://localhost:8501"))
+STRAVA_REDIRECT_URI = st.secrets.get("STRAVA_REDIRECT_URI", os.getenv("STRAVA_REDIRECT_URI", ""))
 
-if STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET and STRAVA_REDIRECT_URI:
-    st.markdown(f"[Connect Strava]({oauth_link(STRAVA_CLIENT_ID, STRAVA_REDIRECT_URI, scope='read,activity:read_all')})")
+from strava_auth import oauth_link, exchange_code_for_token
+import strava_ingest as s_ing
+
+if not STRAVA_CLIENT_ID or not STRAVA_CLIENT_SECRET or not STRAVA_REDIRECT_URI:
+    st.warning("Set STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET / STRAVA_REDIRECT_URI in Secrets.")
 else:
-    st.warning("Set STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET / STRAVA_REDIRECT_URI in secrets or env.")
+    st.markdown(f"[Connect Strava]({oauth_link(STRAVA_CLIENT_ID, STRAVA_REDIRECT_URI, scope='read,activity:read_all')})")
 
-code = st.text_input("Paste ?code=... from Strava (first-time link)", value="")
-
-if st.button("Link Strava"):
+# --- АВТО ЛИНКВАНЕ: хващаме ?code=... от URL и свързваме без ръчно копиране ---
+try:
+    # Streamlit >=1.30: st.query_params; по-старо: st.experimental_get_query_params()
     try:
-        js = exchange_code_for_token(
-            STRAVA_CLIENT_ID,
-            STRAVA_CLIENT_SECRET,
-            code,
-            STRAVA_REDIRECT_URI,  # важно: трябва да е същият redirect като при authorize
-        )
-        sid = js["athlete"]["id"]
-        db.upsert_token(
-            athlete_key=athlete_key,
-            strava_athlete_id=sid,
-            access_token=js["access_token"],
-            refresh_token=js["refresh_token"],
-            expires_at=js["expires_at"],
-        )
-        st.success(f"Linked athlete {sid}.")
-    except Exception as e:
-        st.error(f"{e}")
+        qp = st.query_params
+        # когато е MappingProxy, превърни в dict със списъци за съвместимост
+        if hasattr(qp, "to_dict"):
+            qp = qp.to_dict()
+    except Exception:
+        qp = st.experimental_get_query_params()
 
+    code_from_url = None
+    if isinstance(qp, dict) and "code" in qp:
+        v = qp["code"]
+        code_from_url = v[0] if isinstance(v, list) else v
+
+    if code_from_url and not st.session_state.get("strava_linked_ok"):
+        try:
+            js = exchange_code_for_token(
+                STRAVA_CLIENT_ID,
+                STRAVA_CLIENT_SECRET,
+                code_from_url,
+                STRAVA_REDIRECT_URI,
+            )
+            sid = js["athlete"]["id"]
+            db.upsert_token(
+                athlete_key=athlete_key,
+                strava_athlete_id=sid,
+                access_token=js["access_token"],
+                refresh_token=js["refresh_token"],
+                expires_at=js["expires_at"],
+            )
+            st.session_state["strava_linked_ok"] = True
+            st.success(f"Linked athlete {sid}.")
+
+            # изчисти URL параметрите, да не остава ?code=...
+            try:
+                st.experimental_set_query_params()
+            except Exception:
+                pass
+
+            # по избор: авто-импорт веднага след свързване
+            try:
+                ids = s_ing.fetch_activities(
+                    athlete_key,
+                    after_ts=None,
+                    before_ts=None,
+                    client_id=STRAVA_CLIENT_ID,
+                    client_secret=STRAVA_CLIENT_SECRET,
+                )
+                st.info(f"Imported {len(ids)} activities right after linking.")
+            except Exception as imp_e:
+                st.warning(f"Linked OK, import deferred: {imp_e}")
+
+        except Exception as link_e:
+            st.error(f"Strava linking failed: {link_e}")
+except Exception as autolink_e:
+    st.warning(f"Auto-link note: {autolink_e}")
+
+# Ръчни бутони за импорт (полезни и след това)
 c1, c2 = st.columns(2)
 after = c1.date_input("After (optional)")
 before = c2.date_input("Before (optional)")
