@@ -12,15 +12,14 @@ DATABASE_URL = (
     or "sqlite:///onflows.db"
 )
 
-# Supabase понякога дава стар префикс
+# старият префикс postgres:// → поправяме към postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 engine = create_engine(DATABASE_URL, future=True, pool_pre_ping=True, echo=False)
 
-
 # ------------------------------------------------------------
-# Schema (авто-миграции)
+# Schema (авто-миграции) – работи за SQLite и Postgres
 # ------------------------------------------------------------
 SCHEMA_SQL = """
 -- onFlows schema (idempotent)
@@ -37,10 +36,13 @@ CREATE TABLE IF NOT EXISTS workouts (
     distance_m REAL,
     avg_hr REAL,
     avg_speed_mps REAL,
-    notes TEXT
+    notes TEXT,
+    strava_id BIGINT,
+    has_streams BOOLEAN DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_workouts_ath_time ON workouts(athlete_key, start_time);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_workouts_strava_id ON workouts(strava_id);
 
 CREATE TABLE IF NOT EXISTS hr_speed_points (
     id SERIAL PRIMARY KEY,
@@ -64,44 +66,37 @@ CREATE TABLE IF NOT EXISTS tokens (
 
 def ensure_schema():
     """
-    Автоматично създава таблиците.
-    - На SQLite: винаги.
-    - На Postgres: опитва; ако ролята няма права -> вдига информативно изключение.
+    Създава/актуализира схемата:
+      - SQLite: винаги
+      - Postgres (Supabase): опитва; ако ролята няма CREATE, вдига информативно съобщение
     """
     backend = engine.url.get_backend_name()
 
-    # SQLite – винаги можем
     if backend.startswith("sqlite"):
         with engine.begin() as conn:
-            # заменяме SERIAL с INTEGER AUTOINCREMENT за съвместимост
+            # SERIAL → INTEGER за SQLite
             sqlite_sql = SCHEMA_SQL.replace("SERIAL", "INTEGER")
             conn.exec_driver_sql(sqlite_sql)
         return True
 
-    # Postgres / Supabase
     try:
         with engine.begin() as conn:
-            # Уверяваме се, че сме в public schema (Supabase)
             conn.execute(text("set search_path to public"))
             conn.execute(text(SCHEMA_SQL))
         return True
     except (ProgrammingError, OperationalError) as e:
-        # няма права за DDL – информираме, но не спираме приложението
         raise RuntimeError(
-            "DB schema create failed (role likely lacks CREATE privileges). "
-            "Ако си в Supabase, ползвай service-role в Streamlit Secrets, "
-            "или създай таблиците веднъж от SQL Editor."
+            "DB schema create failed (role likely lacks CREATE). "
+            "В Supabase ползвай service-role в Secrets, или пусни schema.sql ръчно."
         ) from e
 
 
-# ------------------------------------------------------------
-# Public API
-# ------------------------------------------------------------
 def init_db():
-    """Запазваме обратно-совместимото име, вика ensure_schema()."""
     return ensure_schema()
 
-
+# ------------------------------------------------------------
+# Profiles
+# ------------------------------------------------------------
 def upsert_profile(athlete_key: str, hr_max: int):
     with engine.begin() as conn:
         backend = engine.url.get_backend_name()
@@ -121,7 +116,6 @@ def upsert_profile(athlete_key: str, hr_max: int):
                 dict(athlete_key=athlete_key, hr_max=int(hr_max)),
             )
 
-
 def fetch_profile(athlete_key: str):
     with engine.begin() as conn:
         res = conn.execute(
@@ -130,113 +124,14 @@ def fetch_profile(athlete_key: str):
         ).mappings().first()
     return dict(res) if res else None
 
-
-def insert_workouts(rows: list[dict]):
-    if not rows:
-        return 0
-    with engine.begin() as conn:
-        backend = engine.url.get_backend_name()
-        for r in rows:
-            if backend.startswith("sqlite"):
-                conn.exec_driver_sql(
-                    "INSERT INTO workouts (athlete_key, start_time, duration_s, distance_m, avg_hr, avg_speed_mps, notes)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        r.get("athlete_key"),
-                        r.get("start_time"),
-                        r.get("duration_s"),
-                        r.get("distance_m"),
-                        r.get("avg_hr"),
-                        r.get("avg_speed_mps"),
-                        r.get("notes"),
-                    ),
-                )
-            else:
-                conn.execute(
-                    text("""
-                        INSERT INTO workouts
-                          (athlete_key, start_time, duration_s, distance_m, avg_hr, avg_speed_mps, notes)
-                        VALUES (:athlete_key, :start_time, :duration_s, :distance_m, :avg_hr, :avg_speed_mps, :notes)
-                    """),
-                    r,
-                )
-    return len(rows)
-
-
-def fetch_workouts(athlete_key: str):
-    with engine.begin() as conn:
-        res = conn.execute(
-            text("""
-                SELECT id, athlete_key, start_time, duration_s, distance_m, avg_hr, avg_speed_mps, notes
-                FROM workouts
-                WHERE athlete_key = :athlete_key
-                ORDER BY start_time ASC
-            """),
-            dict(athlete_key=athlete_key),
-        ).mappings().all()
-    return [dict(r) for r in res]
-
-
-def insert_hr_points(rows: list[dict]):
-    if not rows:
-        return 0
-    with engine.begin() as conn:
-        backend = engine.url.get_backend_name()
-        for r in rows:
-            if backend.startswith("sqlite"):
-                conn.exec_driver_sql(
-                    "INSERT INTO hr_speed_points (workout_id, t_bin_start, mean_hr, mean_vflat)"
-                    " VALUES (?, ?, ?, ?)",
-                    (
-                        r.get("workout_id"),
-                        r.get("t_bin_start"),
-                        r.get("mean_hr"),
-                        r.get("mean_vflat"),
-                    ),
-                )
-            else:
-                conn.execute(
-                    text("""
-                        INSERT INTO hr_speed_points (workout_id, t_bin_start, mean_hr, mean_vflat)
-                        VALUES (:workout_id, :t_bin_start, :mean_hr, :mean_vflat)
-                    """),
-                    r,
-                )
-    return len(rows)
-
-
-def fetch_hr_points(workout_ids: list[int]):
-    if not workout_ids:
-        return []
-    backend = engine.url.get_backend_name()
-    with engine.begin() as conn:
-        if backend.startswith("sqlite"):
-            placeholders = ",".join(["?"] * len(workout_ids))
-            sql = f"""
-                SELECT workout_id, t_bin_start, mean_hr, mean_vflat
-                FROM hr_speed_points
-                WHERE workout_id IN ({placeholders})
-            """
-            res = conn.exec_driver_sql(sql, tuple(workout_ids)).mappings().all()
-        else:
-            res = conn.execute(
-                text("""
-                    SELECT workout_id, t_bin_start, mean_hr, mean_vflat
-                    FROM hr_speed_points
-                    WHERE workout_id = ANY(:ids)
-                """),
-                dict(ids=workout_ids),
-            ).mappings().all()
-    return [dict(r) for r in res]
-
-
-# -------- Strava tokens --------
+# ------------------------------------------------------------
+# Tokens (Strava)
+# ------------------------------------------------------------
 def upsert_token(athlete_key: str, strava_athlete_id: str,
                  access_token: str, refresh_token: str, expires_at: int):
     with engine.begin() as conn:
         backend = engine.url.get_backend_name()
         if backend.startswith("sqlite"):
-            # SQLite: създай таблицата при нужда (идемпотентно)
             conn.exec_driver_sql("""
                 CREATE TABLE IF NOT EXISTS tokens (
                     athlete_key TEXT PRIMARY KEY,
@@ -271,15 +166,148 @@ def upsert_token(athlete_key: str, strava_athlete_id: str,
                      at=access_token, rt=refresh_token, exp=int(expires_at)),
             )
 
-
 def get_token(athlete_key: str):
     with engine.begin() as conn:
         res = conn.execute(
             text("""
                 SELECT strava_athlete_id, access_token, refresh_token, expires_at
-                FROM tokens
-                WHERE athlete_key=:k
+                FROM tokens WHERE athlete_key=:k
             """),
             dict(k=athlete_key),
         ).mappings().first()
     return dict(res) if res else None
+
+# ------------------------------------------------------------
+# Workouts
+# ------------------------------------------------------------
+def insert_workouts(rows: list[dict]):
+    if not rows:
+        return 0
+    with engine.begin() as conn:
+        backend = engine.url.get_backend_name()
+        for r in rows:
+            payload = {
+                "athlete_key": r.get("athlete_key"),
+                "start_time": r.get("start_time"),
+                "duration_s": r.get("duration_s"),
+                "distance_m": r.get("distance_m"),
+                "avg_hr": r.get("avg_hr"),
+                "avg_speed_mps": r.get("avg_speed_mps"),
+                "notes": r.get("notes"),
+                "strava_id": r.get("strava_id"),
+                "has_streams": r.get("has_streams", False),
+            }
+            if backend.startswith("sqlite"):
+                conn.exec_driver_sql(
+                    "INSERT OR IGNORE INTO workouts "
+                    "(athlete_key,start_time,duration_s,distance_m,avg_hr,avg_speed_mps,notes,strava_id,has_streams) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    tuple(payload.values()),
+                )
+            else:
+                conn.execute(text("""
+                    INSERT INTO workouts
+                    (athlete_key,start_time,duration_s,distance_m,avg_hr,avg_speed_mps,notes,strava_id,has_streams)
+                    VALUES (:athlete_key,:start_time,:duration_s,:distance_m,:avg_hr,:avg_speed_mps,:notes,:strava_id,:has_streams)
+                    ON CONFLICT (strava_id) DO NOTHING
+                """), payload)
+    return len(rows)
+
+def fetch_workouts(athlete_key: str):
+    with engine.begin() as conn:
+        res = conn.execute(
+            text("""
+                SELECT id, athlete_key, start_time, duration_s, distance_m, avg_hr, avg_speed_mps, notes, strava_id, has_streams
+                FROM workouts
+                WHERE athlete_key = :athlete_key
+                ORDER BY start_time ASC
+            """),
+            dict(athlete_key=athlete_key),
+        ).mappings().all()
+    return [dict(r) for r in res]
+
+def workouts_needing_streams(athlete_key: str, limit: int = 25):
+    with engine.begin() as conn:
+        res = conn.execute(text("""
+            SELECT id, strava_id, start_time
+            FROM workouts
+            WHERE athlete_key=:k AND has_streams = FALSE AND strava_id IS NOT NULL
+            ORDER BY start_time DESC
+            LIMIT :lim
+        """), dict(k=athlete_key, lim=limit)).mappings().all()
+    return [dict(r) for r in res]
+
+def set_has_streams(workout_id: int, value: bool = True):
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE workouts SET has_streams=:v WHERE id=:id"),
+                     dict(v=value, id=workout_id))
+
+# ------------------------------------------------------------
+# HR–speed points
+# ------------------------------------------------------------
+def insert_hr_points(rows: list[dict]):
+    if not rows:
+        return 0
+    with engine.begin() as conn:
+        backend = engine.url.get_backend_name()
+        for r in rows:
+            if backend.startswith("sqlite"):
+                conn.exec_driver_sql(
+                    "INSERT INTO hr_speed_points (workout_id, t_bin_start, mean_hr, mean_vflat)"
+                    " VALUES (?, ?, ?, ?)",
+                    (
+                        r.get("workout_id"),
+                        r.get("t_bin_start"),
+                        r.get("mean_hr"),
+                        r.get("mean_vflat"),
+                    ),
+                )
+            else:
+                conn.execute(
+                    text("""
+                        INSERT INTO hr_speed_points (workout_id, t_bin_start, mean_hr, mean_vflat)
+                        VALUES (:workout_id, :t_bin_start, :mean_hr, :mean_vflat)
+                    """),
+                    r,
+                )
+    return len(rows)
+
+def fetch_hr_points(workout_ids: list[int]):
+    if not workout_ids:
+        return []
+    backend = engine.url.get_backend_name()
+    with engine.begin() as conn:
+        if backend.startswith("sqlite"):
+            placeholders = ",".join(["?"] * len(workout_ids))
+            sql = f"""
+                SELECT workout_id, t_bin_start, mean_hr, mean_vflat
+                FROM hr_speed_points
+                WHERE workout_id IN ({placeholders})
+            """
+            res = conn.exec_driver_sql(sql, tuple(workout_ids)).mappings().all()
+        else:
+            res = conn.execute(
+                text("""
+                    SELECT workout_id, t_bin_start, mean_hr, mean_vflat
+                    FROM hr_speed_points
+                    WHERE workout_id = ANY(:ids)
+                """),
+                dict(ids=workout_ids),
+            ).mappings().all()
+    return [dict(r) for r in res]
+
+# ------------------------------------------------------------
+# Generic select (optional)
+# ------------------------------------------------------------
+def generic_select(table: str, where: str = "1=1"):
+    with engine.begin() as conn:
+        try:
+            res = conn.execute(text(f"SELECT * FROM {table} WHERE {where}")).mappings().all()
+            return [dict(r) for r in res]
+        except Exception as e:
+            print(f"⚠️ Error selecting from {table}:", e)
+            return []
+
+if __name__ == "__main__":
+    print("Initializing DB…")
+    init_db()
