@@ -16,6 +16,12 @@ import strava_ingest as s_ing
 
 st.set_page_config(page_title="onFlows – VTS & Training Control", layout="wide")
 
+# >>> НОВО: инициализация на БД (създава таблици за SQLite; за Postgres/Supabase очаква изпълнен schema.sql)
+try:
+    db.init_db()
+except Exception as e:
+    st.sidebar.warning(f"DB init notice: {e}")
+
 # ----------------------- НАСТРОЙКИ/ПРОФИЛ -----------------------
 st.sidebar.title("onFlows")
 athlete_key = st.sidebar.text_input("Athlete ID", value="demo_user")
@@ -39,7 +45,6 @@ except Exception as e:
     st.error(f"Couldn't load ideal curve CSV: {e}")
     st.stop()
 
-# нормализиране към distance_m / time_s / speed_mps (функцията приема и твоя формат)
 ideal_df = vts_model._normalize_ideal(ideal_raw)
 st.dataframe(ideal_raw.head(), use_container_width=True)
 
@@ -52,10 +57,8 @@ dist_12min = c2.number_input("Distance in 12-min test (m)", min_value=1000, max_
 cs, w_prime = vts_model.compute_cs(dist_3min, dist_12min, t1=180, t2=720)
 st.markdown(f"**Critical Speed (CS):** {cs:.2f} m/s  **W′:** {w_prime:.2f} m")
 
-# персонална крива (по CS)
 personal_df = vts_model.build_personal_curve(ideal_df, cs)
 
-# Графика Ideal vs Personalized
 st.subheader("VTS curve (Ideal vs Personalized)")
 if not ideal_df.empty and not personal_df.empty:
     chart = (
@@ -76,7 +79,6 @@ if not ideal_df.empty and not personal_df.empty:
 else:
     st.info("Ideal or personal curve is empty.")
 
-# Зони
 st.subheader("Zones by speed (from CS)")
 zones_df = vts_model.compute_zones(cs)
 st.dataframe(zones_df, use_container_width=True)
@@ -143,7 +145,6 @@ else:
 # ----------------------- ACWR -----------------------
 st.subheader("ACWR (weekly)")
 if not wk_df.empty:
-    # оценка на зона по avg speed/pace спрямо CS-зоните
     if "avg_speed_mps" in wk_df:
         wk_df["avg_speed_mps"] = wk_df["avg_speed_mps"].fillna(wk_df["distance_m"] / wk_df["duration_s"])
     else:
@@ -218,3 +219,4 @@ if st.button("Fetch 1 Hz for activity"):
         st.success(f"Attached {n} HR–V 30s points.")
     except Exception as e:
         st.error(f"Streams failed: {e}")
+
