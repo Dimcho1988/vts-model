@@ -180,27 +180,45 @@ else:
     st.warning("Set STRAVA_CLIENT_ID / STRAVA_CLIENT_SECRET / STRAVA_REDIRECT_URI in secrets or env.")
 
 code = st.text_input("Paste ?code=... from Strava (first-time link)", value="")
+
 if st.button("Link Strava"):
     try:
-       js = exchange_code_for_token(STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, code, STRAVA_REDIRECT_URI)
+        js = exchange_code_for_token(
+            STRAVA_CLIENT_ID,
+            STRAVA_CLIENT_SECRET,
+            code,
+            STRAVA_REDIRECT_URI,  # важно: трябва да е същият redirect като при authorize
+        )
         sid = js["athlete"]["id"]
-        db.upsert_token(athlete_key, sid, js["access_token"], js["refresh_token"], js["expires_at"])
+        db.upsert_token(
+            athlete_key=athlete_key,
+            strava_athlete_id=sid,
+            access_token=js["access_token"],
+            refresh_token=js["refresh_token"],
+            expires_at=js["expires_at"],
+        )
         st.success(f"Linked athlete {sid}.")
     except Exception as e:
-        st.error(f"Failed: {e}")
+        st.error(f"{e}")
 
 c1, c2 = st.columns(2)
 after = c1.date_input("After (optional)")
 before = c2.date_input("Before (optional)")
 
 def to_ts(d):
-    if not d: return None
+    if not d:
+        return None
     return int(pd.Timestamp(d).tz_localize("UTC").timestamp())
 
 if st.button("Import Strava activities"):
     try:
-        ids = s_ing.fetch_activities(athlete_key, after_ts=to_ts(after), before_ts=to_ts(before),
-                                     client_id=STRAVA_CLIENT_ID, client_secret=STRAVA_CLIENT_SECRET)
+        ids = s_ing.fetch_activities(
+            athlete_key,
+            after_ts=to_ts(after),
+            before_ts=to_ts(before),
+            client_id=STRAVA_CLIENT_ID,
+            client_secret=STRAVA_CLIENT_SECRET,
+        )
         st.success(f"Imported {len(ids)} activities.")
     except Exception as e:
         st.error(f"Import failed: {e}")
@@ -214,9 +232,8 @@ if st.button("Fetch 1 Hz for activity"):
             int(act_id or 0),
             client_id=STRAVA_CLIENT_ID,
             client_secret=STRAVA_CLIENT_SECRET,
-            attach_workout_id=wk_df2["id"].iloc[-1] if not wk_df2.empty else None
+            attach_workout_id=wk_df2["id"].iloc[-1] if not wk_df2.empty else None,
         )
         st.success(f"Attached {n} HR–V 30s points.")
     except Exception as e:
         st.error(f"Streams failed: {e}")
-
