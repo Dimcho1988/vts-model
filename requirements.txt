@@ -9,3 +9,4 @@ requests>=2.31
 oauthlib>=3.2
 fastapi>=0.111
 uvicorn>=0.30
+matplotlib>=3.8
