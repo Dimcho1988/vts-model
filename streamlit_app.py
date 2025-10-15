@@ -30,26 +30,26 @@ st.sidebar.title("onFlows")
 st.sidebar.caption("Control & Evaluation of Running Load")
 
 if "tokens" not in st.session_state:
-    # Parse ?code= from URL for OAuth return
     params = st.query_params
     if "code" in params:
         try:
             tokens = su.exchange_token(params["code"])
             st.session_state["tokens"] = tokens
-            st.success("Strava connected!")
+
+            # --- NEW: create/find user by Strava athlete id and store tokens
+            athlete = tokens.get("athlete", {})  # Strava връща атлет в token payload
+            athlete_id = athlete.get("id")
+            prof_row = db.get_or_create_user(athlete_id, extra={
+                # по желание можеш да пазиш малко метаданни
+                # "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+            st.session_state["user_id"] = prof_row["id"]
+            db.save_tokens(prof_row["id"], tokens)
+
+            st.success("Strava connected & user profile created.")
         except Exception as e:
             st.error(f"Token exchange failed: {e}")
 
-if "tokens" not in st.session_state:
-    st.sidebar.info("Connect your Strava account")
-    su.connect_button()
-else:
-    st.sidebar.success("Strava connected.")
-    if st.sidebar.button("Disconnect"):
-        st.session_state.pop("tokens", None)
-        st.rerun()
-
-view = st.sidebar.radio("View", ["Dashboard", "Workloads & Zones", "VTS Profiles", "Plan & Targets"])
 
 # --------- Load / refresh activities ---------
 def ensure_profile():
