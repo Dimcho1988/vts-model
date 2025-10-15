@@ -1,5 +1,4 @@
-# streamlit_app.py — onFlows (VTS) MVP
-import os, math, json, time
+import os, json, time
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -7,7 +6,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# --- make imports work whether modules are in utils/ or in repo root
+# --- imports: work both with utils/ and root modules
 try:
     from utils import db
     from utils import strava as su
@@ -21,10 +20,8 @@ except ModuleNotFoundError:
 
 st.set_page_config(page_title="onFlows — Running Load", layout="wide")
 
-
-# ===== Helpers / Config ======================================================
-APP = dict(st.secrets.get("app", {}))  # няма KeyError, ако липсва секция
-
+# ================== Config ==================
+APP = dict(st.secrets.get("app", {}))
 ZONES = {
     "Z1": (APP.get("z1_low", 0.60), APP.get("z1_high", 0.80)),
     "Z2": (APP.get("z2_low", 0.80), APP.get("z2_high", 0.90)),
@@ -35,24 +32,21 @@ ZONES = {
 
 @st.cache_data
 def load_ideal():
-    # търси и в data/, и в root
     for p in ("data/ideal_distance_time_speed.csv", "ideal_distance_time_speed.csv"):
         if os.path.exists(p):
             return vts.load_ideal_csv(p)
     raise FileNotFoundError("ideal_distance_time_speed.csv not found in data/ or repo root")
 
 def ensure_profile():
-    """Връща user_id от сесията; ако няма, връща нулев fallback (но не записва в БД)."""
     if "user_id" in st.session_state:
         return {"user_id": st.session_state["user_id"]}
     return {"user_id": "00000000-0000-0000-0000-000000000000"}
 
-
-# ===== Sidebar (OAuth + Navigation) =========================================
+# ================== Sidebar ==================
 st.sidebar.title("onFlows")
 st.sidebar.caption("Control & Evaluation of Running Load")
 
-# 1) Ако Strava се е върнал с ?code=, разменяме код за токен, създаваме user и пазим токени
+# Handle OAuth return (?code=...)
 if "tokens" not in st.session_state:
     params = st.query_params
     if "code" in params:
@@ -60,20 +54,16 @@ if "tokens" not in st.session_state:
             tokens = su.exchange_token(params["code"])
             st.session_state["tokens"] = tokens
 
-            # Strava връща данни за атлета в token payload-а
             athlete = tokens.get("athlete", {})
-            athlete_id = athlete.get("id")
-            # създаване/намиране на user в Supabase по athlete_id
-            prof_row = db.get_or_create_user(int(athlete_id), extra=None)
+            athlete_id = int(athlete.get("id"))
+            prof_row = db.get_or_create_user(athlete_id)
             st.session_state["user_id"] = prof_row["id"]
-            # запис на токени
             db.save_tokens(prof_row["id"], tokens)
 
-            st.success("Strava connected & user profile created.")
+            st.success("Strava connected & user created.")
         except Exception as e:
             st.error(f"Token exchange failed: {e}")
 
-# 2) UI за статус и disconnect
 if "tokens" in st.session_state:
     st.sidebar.success("Strava connected.")
     if st.sidebar.button("Disconnect"):
@@ -82,22 +72,16 @@ if "tokens" in st.session_state:
         st.rerun()
 else:
     st.sidebar.info("Connect your Strava account")
-    # показва бутон към Strava OAuth
     su.connect_button()
 
-# 3) Sync бутон (извън OAuth)
 def sync_recent_activities():
-    """Дърпа последните активности и ги записва в Supabase."""
     if "tokens" not in st.session_state:
         st.warning("Connect Strava first.")
         return
-
-    prof = ensure_profile()
-    uid = prof["user_id"]
-    if uid == "00000000-0000-0000-0000-000000000000":
+    uid = ensure_profile()["user_id"]
+    if uid.startswith("0000"):
         st.warning("No user profile yet — connect Strava first.")
         return
-
     try:
         access = st.session_state["tokens"]["access_token"]
         acts = su.list_activities(access_token=access, per_page=30, page=1)
@@ -128,16 +112,15 @@ def sync_recent_activities():
 if st.sidebar.button("Sync recent Strava"):
     sync_recent_activities()
 
-# 4) Навигация (ТРЯБВА да е преди използване на view)
+# Navigation
 view = st.sidebar.radio(
     "View",
     ["Dashboard", "Workloads & Zones", "VTS Profiles", "Plan & Targets"]
 )
 
+# ================== Views ==================
 
-# ===== Views ================================================================
-
-# ---------------- Dashboard ----------------
+# ----- Dashboard -----
 if view == "Dashboard":
     st.header("Dashboard")
     st.write("• Connect Strava, sync activities, compute CS/W′ and baseline VTS.")
@@ -147,7 +130,7 @@ if view == "Dashboard":
         except Exception as e:
             st.error(f"Could not load ideal CSV: {e}")
 
-# -------------- Workloads & Zones --------------
+# ----- Workloads & Zones -----
 elif view == "Workloads & Zones":
     st.header("Workloads & Zones")
     if "tokens" not in st.session_state:
@@ -164,6 +147,7 @@ elif view == "Workloads & Zones":
             f'{a["name"]} — {a["start_date"][:10]} ({round(a.get("distance",0)/1000,1)} km)': a
             for a in acts if a.get("type","") in ("Run","TrailRun","VirtualRun")
         }
+
         if not options:
             st.info("No recent runs. Hit 'Sync recent Strava' first.")
         else:
@@ -182,12 +166,12 @@ elif view == "Workloads & Zones":
                 st.subheader("Bins (30s) preview")
                 st.dataframe(bins.head(20))
 
-                # Бърза оценка на CS/W' от най-добрите средни (3′, 12′, 30′)
+                # Quick CS/W′ from best rolling windows
                 def best_mean_speed(df, window):
                     x = df["v"].rolling(window, min_periods=window).mean().dropna()
                     if x.empty:
                         return None
-                    return float(3.6*x.max())
+                    return float(3.6 * x.max())
 
                 pts = []
                 for w in [180, 720, 1800]:
@@ -209,10 +193,10 @@ elif view == "Workloads & Zones":
                 fig = px.bar(zt, x="zone", y="time_s", title="Time by zone (s)")
                 st.plotly_chart(fig, use_container_width=True)
 
-# ---------------- VTS Profiles ----------------
+# ----- VTS Profiles -----
 elif view == "VTS Profiles":
     st.header("VTS Profiles")
-    st.write("Baseline VTS from CS/W′ plus modeled variants.")
+    st.write("Baseline VTS from CS/W′ plus modeled variants, with Ideal CSV overlay.")
     cs_kmh = st.number_input("CS (km/h)", value=12.0, step=0.1)
     wprime_m = st.number_input("W′ (m)", value=15000, step=100)
 
@@ -229,19 +213,29 @@ elif view == "VTS Profiles":
     dI = st.slider("ΔIglob (−0.10..+0.10)", -0.10, 0.10, 0.0, 0.01)
     vol_hrv = vts.apply_hrv_gain(vol, dI)
 
+    # Personal curves (min)
     df_plot = pd.DataFrame({
         "v_kmh": base["v_kmh"],
-        "Baseline": base["t_sec"]/60,
-        "Modeled (Volume)": vol["t_sec"]/60,
-        "Modeled (Volume + HR/V)": vol_hrv["t_sec"]/60,
+        "Baseline": base["t_sec"] / 60.0,
+        "Modeled (Volume)": vol["t_sec"] / 60.0,
+        "Modeled (Volume + HR/V)": vol_hrv["t_sec"] / 60.0,
     })
-    df_melt = df_plot.melt(id_vars="v_kmh", var_name="Curve", value_name="t_min")
-    fig = px.line(df_melt, x="v_kmh", y="t_min", color="Curve",
+    personal = df_plot.melt(id_vars="v_kmh", var_name="Curve", value_name="t_min")
+
+    # Ideal overlay (if available)
+    try:
+        ideal = load_ideal().rename(columns={"speed_kmh": "v_kmh", "time_min": "t_min"})
+        ideal["Curve"] = "Ideal"
+        to_plot = pd.concat([personal, ideal], ignore_index=True)
+    except Exception:
+        to_plot = personal
+
+    fig = px.line(to_plot, x="v_kmh", y="t_min", color="Curve",
                   title="VTS curves (time-to-exhaustion in minutes)")
     st.plotly_chart(fig, use_container_width=True)
-    st.caption("Guards: per-speed change is clipped to ~±20–25% vs baseline.")
+    st.caption("Guards: time is capped for stability; modeled curves are clipped to ±25% vs baseline.")
 
-# ---------------- Plan & Targets ----------------
+# ----- Plan & Targets -----
 elif view == "Plan & Targets":
     st.header("Plan & Targets")
     st.write("Simple weekly targets based on CS and your ideal curve (prototype).")
@@ -254,9 +248,9 @@ elif view == "Plan & Targets":
     })
     ref["v_kmh"] = ref["r_cs"] * cs_kmh
     ref["t_opt_min"] = np.interp(ref["v_kmh"], ideal["speed_kmh"], ideal["time_min"])
-    k = {"Z1":2.2, "Z2":1.6, "Z3":1.0, "Z4":0.5, "Z5":0.25}
-    ref["T_target_h"] = ref["zone"].map(k) * (ref["t_opt_min"]/60.0)
+    k = {"Z1": 2.2, "Z2": 1.6, "Z3": 1.0, "Z4": 0.5, "Z5": 0.25}
+    ref["T_target_h"] = ref["zone"].map(k) * (ref["t_opt_min"] / 60.0)
 
-    st.dataframe(ref[["zone","v_kmh","t_opt_min","T_target_h"]])
+    st.dataframe(ref[["zone", "v_kmh", "t_opt_min", "T_target_h"]])
     fig = px.bar(ref, x="zone", y="T_target_h", title="Weekly target time by zone (hours)")
     st.plotly_chart(fig, use_container_width=True)
