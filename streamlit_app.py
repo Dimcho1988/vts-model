@@ -53,7 +53,9 @@ if "tokens" not in st.session_state:
 
 # --------- Load / refresh activities ---------
 def ensure_profile():
-    # In a simple MVP we keep user in session only; extend to persist users_profile in Supabase.
+    if "user_id" in st.session_state:
+        return {"user_id": st.session_state["user_id"]}
+    # fallback за локални тестове (но вече няма да се ползва)
     return {"user_id": "00000000-0000-0000-0000-000000000000"}
 
 def sync_recent_activities():
